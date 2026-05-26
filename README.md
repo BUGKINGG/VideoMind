@@ -1,1 +1,1 @@
-## Yesterday, all my troubles seemed to far away
+## Yesterday, all my troubles seemed so far away
