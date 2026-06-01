@@ -34,6 +34,9 @@ VideoMind/
 │   │   ├── utils/
 │   │   │   └── request.ts                # Axios 请求封装（放置 jwt 令牌）
 │   │   ├── views/                        # 页面级组件
+|   |   |   ├──Home.vue                   # 主页面
+|   |   |   |
+|   |   |   └──Login.vue                  # 登录页面
 │   │   ├── App.vue                       # 根组件
 │   │   ├── main.ts                       # 应用入口（挂载、全局配置）
 │   │   └── style.css
