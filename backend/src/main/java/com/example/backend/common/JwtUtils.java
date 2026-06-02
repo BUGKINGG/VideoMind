@@ -25,8 +25,10 @@ public class JwtUtils {
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
 
+    // token 生存时间
     private static final long EXPIRATION = 72000;
 
+    // 创造 token 的方法
     public String generateToken(String account){
         return Jwts.builder()
             .subject(account)
@@ -36,6 +38,7 @@ public class JwtUtils {
             .compact();
     }
 
+    // 检验 token 是否合法的方法，如果非法则抛异常
     public String parseToken(String token){
         return Jwts.parser()
             .verifyWith(this.key)

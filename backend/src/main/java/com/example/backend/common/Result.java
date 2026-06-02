@@ -2,6 +2,7 @@ package com.example.backend.common;
 
 import lombok.Data;
 
+// 返回给前端
 @Data
 public class Result<T> {
     private Integer code;

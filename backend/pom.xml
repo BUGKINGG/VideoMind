@@ -57,7 +57,7 @@
         <groupId>org.springdoc</groupId>
         <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
         <version>3.0.2</version>
-    </dependency>
+        </dependency>
 
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
@@ -69,13 +69,19 @@
         <artifactId>jjwt-impl</artifactId>
         <version>0.12.3</version>
         <scope>runtime</scope>
-    </dependency>
+        </dependency>
         <dependency>
         <groupId>io.jsonwebtoken</groupId>
         <artifactId>jjwt-jackson</artifactId>
         <version>0.12.3</version>
         <scope>runtime</scope>
-    </dependency>
+        </dependency>
+
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+            <version>3.5.7</version>
+        </dependency>
     </dependencies>
 
     <build>

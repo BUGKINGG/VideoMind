@@ -15,6 +15,7 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
     @Autowired
     private JwtUtils jwtUtils;
 
+    // 拦截器方法
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         String token = request.getHeader("token");
@@ -32,7 +33,7 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
         }
 
         try{
-            // parseToken 方法可以解析 token 是否合规，如果不合格则抛出异常
+            // parseToken 方法可以解析 token 是否合规，如果不合规则抛出异常
             jwtUtils.parseToken(token);
             return true;
         } catch (Exception e){

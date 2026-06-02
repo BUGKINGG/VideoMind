@@ -3,3 +3,16 @@ server:
 
 jwt:
   secret: Yesterday-LoveWasSuchEasyGameToP
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml   # 复杂 SQL 的 XML 放哪
+  type-aliases-package: com.videomind.entity      # 实体类包路径，XML 里可以简写
+  configuration:
+    map-underscore-to-camel-case: true             # 自动驼峰转换（create_time -> createTime）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # 打印 SQL 到控制台
+  global-config:
+    db-config:
+      id-type: assign_id   # 主键策略：雪花 ID（Long 类型）
+      logic-delete-field: deleted  # 逻辑删除字段（软删除）
+      logic-delete-value: 1
+      logic-not-delete-value: 0

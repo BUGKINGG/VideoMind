@@ -1,6 +1,8 @@
 package com.example.backend.Controller;
 
 import com.example.backend.DTO.LoginDTO;
+import com.example.backend.DTO.RegisterDTO;
+import com.example.backend.Service.UserService;
 import com.example.backend.VO.LoginVO;
 import com.example.backend.common.JwtUtils;
 import com.example.backend.common.Result;
@@ -17,11 +19,13 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @Slf4j
 @RequestMapping("/api")
-@Tag(name="登入相关接口")
-public class LoginController {
+@Tag(name="用户相关接口")
+public class UserController {
 
     @Autowired
     private JwtUtils jwtUtils;
+    @Autowired
+    private UserService userService;
 
     /**
      * 用户登入
@@ -49,5 +53,15 @@ public class LoginController {
             .build();
 
         return Result.success(loginVO);
+    }
+
+    @PostMapping("/register")
+    @Operation(summary = "用户注册接口")
+    public Result register(@RequestBody RegisterDTO registerDTO){
+        boolean bool = userService.register(registerDTO);
+        if(!bool){
+           return Result.error("账号已存在，请登录");
+        }
+        return Result.success();
     }
 }
