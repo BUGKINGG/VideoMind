@@ -1,4 +1,4 @@
-package com.example.backend.Config;
+package com.example.backend.config;
 
 import com.example.backend.interceptor.JwtTokenInterceptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +26,6 @@ public class WebMvcConfigure implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry){
         registry.addInterceptor(jwtTokenInterceptor)
             .addPathPatterns("/**")
-            .excludePathPatterns("/api/login");
+            .excludePathPatterns("/api/login", "/api/register");
     }
 }

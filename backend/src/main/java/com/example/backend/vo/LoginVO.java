@@ -1,4 +1,4 @@
-package com.example.backend.VO;
+package com.example.backend.vo;
 
 import lombok.Builder;
 import lombok.Data;

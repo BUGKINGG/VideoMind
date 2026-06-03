@@ -1,9 +1,9 @@
-package com.example.backend.Controller;
+package com.example.backend.controller;
 
-import com.example.backend.DTO.LoginDTO;
-import com.example.backend.DTO.RegisterDTO;
-import com.example.backend.Service.UserService;
-import com.example.backend.VO.LoginVO;
+import com.example.backend.dto.LoginDTO;
+import com.example.backend.dto.RegisterDTO;
+import com.example.backend.service.UserService;
+import com.example.backend.vo.LoginVO;
 import com.example.backend.common.JwtUtils;
 import com.example.backend.common.Result;
 import io.swagger.v3.oas.annotations.Operation;

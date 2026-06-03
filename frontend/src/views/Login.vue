@@ -9,6 +9,7 @@
   const password_register = ref('')
   const password_repeat = ref('')
   const account_register = ref('')
+  const username_register = ref('')
   currentView.value = 'login'
 
   const router = useRouter();
@@ -73,6 +74,22 @@
     }
 
     // 全部通过，执行注册请求
+    const res = await request.post("/api/register", {
+      username: username_register.value,
+      account: account_register.value,
+      password: password_register.value
+    })
+
+    if(res.code === 500){
+      alert("账户已存在")
+      return;
+    }
+
+    if(res.code === 200){
+      alert("注册成功！")
+      currentView.value = 'login'
+      return;
+    }
   }
 
   function turnBack() {
@@ -105,6 +122,12 @@
     <div v-else-if="currentView === 'register'" class="card">
       <h2 class="title">注册账号</h2>
       <div class="form">
+
+        <div class="form-row">
+          <label>用户名：</label>
+          <input class="input" placeholder="用户名" v-model="username_register">
+        </div>
+
         <div class="form-row">
           <label>账号：</label>
           <input class="input" placeholder="请输入手机号注册" v-model="account_register">
@@ -159,11 +182,11 @@
 .form-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .form-row label {
-  width: 60px;
+  width: 80px;
   flex-shrink: 0;
   color: #555;
 }
