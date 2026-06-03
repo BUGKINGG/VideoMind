@@ -2,6 +2,7 @@
   import {ref} from "vue";
   import {useRouter} from "vue-router";
   import request from "../utils/request";
+  import { useUserStore } from "../stores/user.ts";
 
   const account = ref<string>('');
   const password = ref<string>('');
@@ -11,6 +12,8 @@
   const account_register = ref('')
   const username_register = ref('')
   currentView.value = 'login'
+
+  const userStore = useUserStore()
 
   const router = useRouter();
 
@@ -26,7 +29,11 @@
         password: password.value
       })
 
-      localStorage.setItem('token', data.data.token)
+      userStore.setUserInfo({
+        token: data.data.token,
+        username: data.data.username,
+        cookie: data.data.cookie || ''
+      })
       console.log("登入成功", data);
       await router.push('/home')
 
@@ -106,15 +113,15 @@
       <div class="form">
         <div class="form-row">
           <label>账号：</label>
-          <input class="input" placeholder="请输入账号" v-model="account">
+          <input class="input" placeholder="请输入账号" v-model="account" @keyup.enter="handleLogin">
         </div>
 
         <div class="form-row">
           <label>密码：</label>
-          <input type="password" class="input" placeholder="请输入密码" v-model="password">
+          <input type="password" class="input" placeholder="请输入密码" v-model="password" @keyup.enter="handleLogin">
         </div>
 
-        <button class="btn" @click="handleLogin">登入</button>
+        <button class="btn" @click="handleLogin" >登入</button>
         <button class="btn btn-register" @click="registerView">注册</button>
       </div>
     </div>

@@ -1,5 +1,6 @@
 package com.example.backend.interceptor;
 
+import com.example.backend.common.BaseContext;
 import com.example.backend.common.JwtUtils;
 import com.example.backend.common.Result;
 import jakarta.servlet.http.HttpServletRequest;
@@ -8,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 import tools.jackson.databind.ObjectMapper;
+
 
 @Component
 public class JwtTokenInterceptor implements HandlerInterceptor {
@@ -26,6 +28,11 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
             return true;
         }
 
+        // 放行 OPTIONS 预检请求
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+
         // 没有 token 直接401
         if(token == null || token.isEmpty()){
             writeError(response, 401, "未登入，请先登入");
@@ -34,7 +41,9 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
 
         try{
             // parseToken 方法可以解析 token 是否合规，如果不合规则抛出异常
-            jwtUtils.parseToken(token);
+            Long userId = jwtUtils.parseToken(token);
+            // 存入线程上下文
+            BaseContext.setCurrentId(userId);
             return true;
         } catch (Exception e){
             writeError(response, 401, "登入已过期，请重新登入");

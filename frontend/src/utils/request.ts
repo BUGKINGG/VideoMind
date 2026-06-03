@@ -1,4 +1,5 @@
 import axios, { Axios } from "axios";
+import {useUserStore} from "../stores/user.ts";
 
 const request = axios.create({
     baseURL: import.meta.env.VITE_BASE_URL,
@@ -7,9 +8,9 @@ const request = axios.create({
 
 request.interceptors.request.use(
     (config) =>{
-        const token = localStorage.getItem('token')
-        if (token){
-            config.headers['token'] = token
+        const userStore = useUserStore()
+        if (userStore.token){
+            config.headers['token'] = userStore.token
         }
         return config
     },
@@ -30,8 +31,12 @@ request.interceptors.response.use(
     (error) => {
         if(error.response?.status ===401){
             alert('登录已过期请重新登入')
-            localStorage.removeItem('token')
-            window.location.href('/login')
+
+            // 清空 pinia
+            const userStore = useUserStore()
+            userStore.logout()
+
+            window.location.href = '\login'
         }
         return Promise.reject(error)
     }

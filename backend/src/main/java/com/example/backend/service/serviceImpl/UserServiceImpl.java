@@ -1,7 +1,11 @@
 package com.example.backend.service.serviceImpl;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.example.backend.common.BaseContext;
+import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
 import com.example.backend.mapper.UserMapper;
 import com.example.backend.service.UserService;
@@ -18,6 +22,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Autowired
     private BCryptPasswordEncoder bCryptPasswordEncoder;
+    @Autowired
+    private UserMapper userMapper;
 
     @Override
     public boolean register(RegisterDTO registerDTO) {
@@ -47,5 +53,35 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
         this.save(user);
         return true;
+    }
+
+    public User login(LoginDTO loginDTO){
+        User tempUser = userMapper.selectOne(
+            Wrappers.<User>lambdaQuery()
+                .eq(User::getPhone, loginDTO.getAccount())
+        );
+        User user = new User();
+
+        if(tempUser == null){
+            return null;
+        }
+
+        boolean matches = bCryptPasswordEncoder.matches(loginDTO.getPassword(), tempUser.getPasswordHash());
+
+        if(!matches){
+            return user;
+        }
+
+        return tempUser;
+    }
+
+    public void updateCookie(String cookie){
+        Long userId = BaseContext.getCurrentId();
+
+        LambdaUpdateWrapper<User> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(User::getId, userId)
+            .set(User::getCookie, cookie);
+
+        userMapper.update(null, wrapper);
     }
 }

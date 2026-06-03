@@ -192,10 +192,12 @@
 
 <script setup>
 import { ref, computed, nextTick } from 'vue'
+import {useUserStore} from "../stores/user.ts";
+import request from '../utils/request'
 
-// TODO:当前为默认数据，接入数据库后需进行修改
 // ========== 用户数据 ==========
-const userName = ref('VideoMind User')
+const userStore = useUserStore()
+const userName = computed(() => userStore.username || "default name")
 const userUid = ref('19241001')
 const userInitials = computed(() => {
   return userName.value
@@ -249,11 +251,25 @@ function backToUpload() {
   messages.value = [...defaultMessages]
 }
 
-function saveCookie() {
-  // TODO: 把 cookieValue 存到 localStorage 或发给后端
-  console.log('保存 Cookie:', cookieValue.value)
-  showCookieModal.value = false
-  alert('Cookie 已保存')
+async function saveCookie() {
+  if(!cookieValue){
+    alert("请输入cookie！")
+    return
+  }
+
+  try{
+    const res = await request.post("/api/cookie", {
+      cookie: cookieValue.value
+    })
+
+    userStore.updateCookie(cookieValue.value)
+
+    console.log('保存 Cookie:', cookieValue.value)
+    showCookieModal.value = false
+    alert('Cookie 已保存')
+  } catch (error){
+    console.error(error)
+  }
 }
 
 function turnToOptions() {

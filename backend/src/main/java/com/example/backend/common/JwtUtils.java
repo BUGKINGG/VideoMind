@@ -1,5 +1,6 @@
 package com.example.backend.common;
 
+import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import jakarta.annotation.PostConstruct;
@@ -29,22 +30,23 @@ public class JwtUtils {
     private static final long EXPIRATION = 72000;
 
     // 创造 token 的方法
-    public String generateToken(String account){
+    public String generateToken(Long userId){
         return Jwts.builder()
-            .subject(account)
+            .claim("userId", userId)
             .issuedAt(new Date())
             .expiration(new Date(System.currentTimeMillis() + EXPIRATION))
             .signWith(this.key)
             .compact();
     }
 
-    // 检验 token 是否合法的方法，如果非法则抛异常
-    public String parseToken(String token){
-        return Jwts.parser()
+    // 检验 token 是否合法的方法，如果非法则抛异常，合法则返回userId
+    public Long parseToken(String token){
+        Claims claims = Jwts.parser()
             .verifyWith(this.key)
             .build()
             .parseSignedClaims(token)
-            .getPayload()
-            .getSubject();
+            .getPayload();
+
+        return claims.get("userId", Long.class);
     }
 }

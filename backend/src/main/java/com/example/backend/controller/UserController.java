@@ -1,7 +1,9 @@
 package com.example.backend.controller;
 
+import com.example.backend.dto.CookieDTO;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
+import com.example.backend.entity.User;
 import com.example.backend.service.UserService;
 import com.example.backend.vo.LoginVO;
 import com.example.backend.common.JwtUtils;
@@ -37,19 +39,19 @@ public class UserController {
     public Result<LoginVO> login(@RequestBody LoginDTO loginDTO){
         log.info("用户登入：{}", loginDTO);
 
-        // TODO: 改成调用数据库进行账户查询
-        String defaultAccount = "admin";
-        String defaultPassword = "123456";
-        if(!defaultAccount.equals(loginDTO.getAccount()) || !defaultPassword.equals(loginDTO.getPassword())){
-            return Result.error("用户或密码错误");
+        User user = userService.login(loginDTO);
+
+        if(user == null){
+            return Result.error("账户不存在或密码错误！");
         }
 
         // 得到 token
-        String token = jwtUtils.generateToken(loginDTO.getAccount());
+        String token = jwtUtils.generateToken(user.getId());
 
         LoginVO loginVO = LoginVO.builder()
-            .account(loginDTO.getAccount())
+            .cookie(user.getCookie())
             .token(token)
+            .username(user.getUsername())
             .build();
 
         return Result.success(loginVO);
@@ -62,6 +64,15 @@ public class UserController {
         if(!bool){
            return Result.error("账号已存在，请登录");
         }
+        return Result.success();
+    }
+
+    @PostMapping("/cookie")
+    @Operation(summary = "更新用户cookie")
+    public Result updateCookie(@RequestBody CookieDTO cookieDTO){
+        String cookie = cookieDTO.getCookie();
+        log.info("更新cookie：{}", cookie);
+        userService.updateCookie(cookie);
         return Result.success();
     }
 }
