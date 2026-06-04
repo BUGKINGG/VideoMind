@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @Slf4j
-@RequestMapping("/api")
+@RequestMapping("/user")
 @Tag(name="用户相关接口")
 public class UserController {
 
@@ -57,6 +57,11 @@ public class UserController {
         return Result.success(loginVO);
     }
 
+    /**
+     * 用户注册
+     * @param registerDTO
+     * @return
+     */
     @PostMapping("/register")
     @Operation(summary = "用户注册接口")
     public Result register(@RequestBody RegisterDTO registerDTO){
@@ -67,6 +72,11 @@ public class UserController {
         return Result.success();
     }
 
+    /**
+     * cookie登记
+     * @param cookieDTO
+     * @return
+     */
     @PostMapping("/cookie")
     @Operation(summary = "更新用户cookie")
     public Result updateCookie(@RequestBody CookieDTO cookieDTO){

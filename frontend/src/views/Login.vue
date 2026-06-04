@@ -24,7 +24,7 @@
     }
 
     try{
-      const data = await request.post('/api/login', {
+      const data = await request.post('/user/login', {
         account: account.value,
         password: password.value
       })
@@ -81,7 +81,7 @@
     }
 
     // 全部通过，执行注册请求
-    const res = await request.post("/api/register", {
+    const res = await request.post("/user/register", {
       username: username_register.value,
       account: account_register.value,
       password: password_register.value

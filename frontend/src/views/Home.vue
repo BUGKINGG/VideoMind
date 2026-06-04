@@ -234,15 +234,31 @@ const showAboutModal = ref(false)
 const cookieValue = ref('')
 
 
-function startSummary() {
+async function startSummary() {
   if (!videoUrl.value) {
     alert('请先上传视频或输入链接')
     return
   }
-  currentVideoTitle.value = videoUrl.value
-  subtitleCount.value = 1247
-  currentView.value = 'chat'
-  // TODO: 调用后端 API 开始分析
+
+  if(!userStore.cookie){
+    alert("请先在设置里设置cookie")
+    return
+  }
+
+  try{
+    const res = await request.post('/agent/summary', {
+      url: videoUrl.value,
+      cookie: userStore.cookie
+    })
+
+    currentVideoTitle.value = videoUrl.value
+    subtitleCount.value = 1247
+    currentView.value = 'chat'
+    alert("成功");
+  }catch (error){
+    alert(error)
+  }
+
 }
 
 function backToUpload() {
@@ -258,7 +274,7 @@ async function saveCookie() {
   }
 
   try{
-    const res = await request.post("/api/cookie", {
+    const res = await request.post("/user/cookie", {
       cookie: cookieValue.value
     })
 

@@ -20,6 +20,7 @@ public class User {
     private String passwordHash;
 
     private String avatarUrl;
+
     private String cookie;
 
     @TableField(fill = FieldFill.INSERT)
