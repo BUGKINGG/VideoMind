@@ -26,8 +26,8 @@ public class JwtUtils {
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
     }
 
-    // token 生存时间
-    private static final long EXPIRATION = 72000;
+    // token 生存时间，单位为 ms 这里为2小时
+    private static final long EXPIRATION = 7200000;
 
     // 创造 token 的方法
     public String generateToken(Long userId){

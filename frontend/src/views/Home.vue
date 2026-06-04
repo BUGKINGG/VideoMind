@@ -256,7 +256,7 @@ async function startSummary() {
     currentView.value = 'chat'
     alert("成功");
   }catch (error){
-    alert(error)
+    console.log(error)
   }
 
 }
