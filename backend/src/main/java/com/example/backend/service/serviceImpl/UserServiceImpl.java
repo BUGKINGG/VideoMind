@@ -69,7 +69,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         boolean matches = bCryptPasswordEncoder.matches(loginDTO.getPassword(), tempUser.getPasswordHash());
 
         if(!matches){
-            return user;
+            return null;
         }
 
         return tempUser;
