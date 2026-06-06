@@ -32,4 +32,7 @@ public class Video {
 
     @TableField("created_at")
     private LocalDateTime createAt;
+
+    @TableField("subtitle_count")
+    private Integer subtitleCount;
 }

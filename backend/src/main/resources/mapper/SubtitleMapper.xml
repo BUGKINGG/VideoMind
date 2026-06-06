@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.example.backend.mapper.SubtitleMapper">
+
+<!-- 批量插入字幕 -->
+<insert id="insertBatch">
+    INSERT INTO subtitle (video_id, content, start_at, end_at) VALUES
+    <foreach collection="list" item="item" separator=",">
+        (#{item.videoId}, #{item.content}, #{item.startAt}, #{item.endAt})
+    </foreach>
+</insert>
+
+</mapper>

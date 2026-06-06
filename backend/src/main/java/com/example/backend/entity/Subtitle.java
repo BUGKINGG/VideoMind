@@ -16,6 +16,7 @@ public class Subtitle {
     private String content;
 
     private Double startAt;
+
     private Double endAt;
 
 }

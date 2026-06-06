@@ -79,7 +79,7 @@
           </div>
 
           <button class="confirm-btn" @click="startSummary">
-             开始总结
+             {{ confirm_text }}
           </button>
 
           <div class="feature-tags">
@@ -199,6 +199,7 @@ import request from '../utils/request'
 const userStore = useUserStore()
 const userName = computed(() => userStore.username || "default name")
 const userUid = ref('19241001')
+const confirm_text = ref('开始总结')
 const userInitials = computed(() => {
   return userName.value
       .split(' ')
@@ -246,16 +247,21 @@ async function startSummary() {
   }
 
   try{
+    confirm_text.value = '解析中...'
     const res = await request.post('/agent/summary', {
       url: videoUrl.value,
       cookie: userStore.cookie
     })
 
-    currentVideoTitle.value = videoUrl.value
-    subtitleCount.value = 1247
+    const result = res.data
+
+    currentVideoTitle.value = result.title || videoUrl.value
+    subtitleCount.value = result.subtitleCount || 0
+
     currentView.value = 'chat'
-    alert("成功");
+    confirm_text.value = '开始总结'
   }catch (error){
+    confirm_text.value = '开始总结'
     console.log(error)
   }
 
