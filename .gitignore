@@ -1,0 +1,15 @@
+.codex_inspect_videomind/
+
+__pycache__/
+*.py[cod]
+
+agent-service/.venv/
+agent-service/.env
+agent-service/data/
+
+new-agent-service/.env
+new-agent-service/.venv/
+new-agent-service/__pycache__/
+new-agent-service/data/
+new-agent-service/app/repositories/data/
+new-agent-service/*.log
