@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VideoMind Agent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">VM</div>
+        <div>
+          <h1>VideoMind</h1>
+          <p>Agent 测试台</p>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <label for="userId">用户 ID</label>
+        <input id="userId" value="admin">
+      </div>
+
+      <div class="field-group">
+        <label for="sessionId">会话 ID</label>
+        <input id="sessionId" value="web-test">
+      </div>
+
+      <div class="field-group">
+        <label for="videoSelect">视频</label>
+        <select id="videoSelect"></select>
+      </div>
+
+      <button id="summaryButton" class="secondary-button">生成视频总结</button>
+
+      <div class="status-row">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusText">正在连接 Agent</span>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div>
+          <p class="eyebrow">当前视频</p>
+          <h2 id="videoTitle">正在加载...</h2>
+        </div>
+        <button id="clearButton" class="icon-button" title="清空页面消息">清空</button>
+      </header>
+
+      <section id="messages" class="messages">
+        <div class="welcome">
+          <h3>向视频提问</h3>
+          <p>Agent 会先检索相关字幕，再根据字幕回答。</p>
+        </div>
+      </section>
+
+      <form id="chatForm" class="composer">
+        <textarea id="questionInput" rows="2" placeholder="例如：科技股为什么出现波动？"></textarea>
+        <button id="sendButton" type="submit">发送</button>
+      </form>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
