@@ -7,20 +7,42 @@ class VideoSummarizer:
     llm_client: LLMClient
 
     def summarize(self, transcript: VideoTranscript, chunks: list[TranscriptChunk]) -> str:
+        '''
+        进行总结
+        1.先把视频字幕分段总结append进数组，然后在对数组里的内容进行再一次总结
+        :param transcript:
+        :param chunks:
+        :return:
+        '''
+
+        '''
+        获得一串一串（chunk）的总结内容，组成数组
+        '''
         chunk_summaries = [
             self.summarize_chunk(transcript.title, chunk.text)
             for chunk in chunks
         ]
+
+        '''
+        最终总结的提示词
+        '''
         final_prompt = self.build_final_summary_prompt(
             title=transcript.title,
             chunk_summaries=chunk_summaries,
         )
         return self.llm_client.generate([{"role": "user", "content": final_prompt}])
 
+    '''
+    一串一串的总结内容
+    '''
     def summarize_chunk(self, title: str, chunk_text: str) -> str:
         prompt = self.build_chunk_summary_prompt(title=title, chunk_text=chunk_text)
         return self.llm_client.generate([{"role": "user", "content": prompt}])
 
+
+    '''
+    返回chunk总结的提示词
+    '''
     def build_chunk_summary_prompt(self, title: str, chunk_text: str) -> str:
         return (
             "你正在处理一段视频字幕的分片。请总结这段内容，要求：\n"
@@ -31,6 +53,9 @@ class VideoSummarizer:
             f"字幕片段：\n{chunk_text}"
         )
 
+    '''
+    返回最终总结的提示词
+    '''
     def build_final_summary_prompt(self, title: str, chunk_summaries: list[str]) -> str:
         chunks_text = "\n\n---\n\n".join(
             f"【第{i+1}段总结】\n{s}" for i, s in enumerate(chunk_summaries)

@@ -13,6 +13,7 @@ public class MessageVO {
     private Integer status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    private Long videoId;
     private String url;
     private Integer part;
     private Long subtitleCount;

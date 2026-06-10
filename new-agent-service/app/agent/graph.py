@@ -33,9 +33,24 @@ class AgentGraphRunner:
         self.graph = self._build_graph()
 
     def run(self, state: AgentGraphState) -> AgentGraphState:
+        '''
+        TODO:目前还是非流式输出，以后可以改成流式
+        :param state:
+        :return:
+        '''
         return self.graph.invoke(state)
 
     def _build_graph(self):
+        '''
+        load_context -> clssify_intent
+                       /              \
+                video_summary       video_qa
+                       \              /
+                       save_conversation
+                              |
+                             END
+        :return:
+        '''
         graph = StateGraph(AgentGraphState)
         graph.add_node("load_context", self.load_context)
         graph.add_node("classify_intent", self.classify_intent)
@@ -59,6 +74,11 @@ class AgentGraphRunner:
         return graph.compile()
 
     def load_context(self, state: AgentGraphState) -> AgentGraphState:
+        '''
+        加载上下文（短期记忆）
+        :param state:
+        :return:
+        '''
         resolved_owner_user_id = self.service._ensure_video_loaded(
             video_id=state["video_id"],
             owner_user_id=state["user_id"],
@@ -81,10 +101,20 @@ class AgentGraphRunner:
         }
 
     def classify_intent(self, state: AgentGraphState) -> AgentGraphState:
+        '''
+        判断user的message里也没有类似“总结”的字眼
+        :param state:
+        :return:
+        '''
         intent = self.intent_classifier.classify(state["message"])
         return {**state, "intent": intent, "route": intent}
 
     def route_by_intent(self, state: AgentGraphState) -> str:
+        '''
+        有总结之类的字眼就转向summary_node
+        :param state:
+        :return:
+        '''
         return state.get("intent", VIDEO_QA)
 
     def video_qa(self, state: AgentGraphState) -> AgentGraphState:
@@ -92,12 +122,18 @@ class AgentGraphRunner:
             state["video_id"],
             owner_user_id=state["resolved_owner_user_id"],
         )
+
+        '''
+        在向量数据库中查找最相关的一些字幕，相当于RAG架构的一部分
+        '''
         retrieved_chunks = self.service.find_relevant_video_chunks(
             user_id=state["user_id"],
             video_id=state["video_id"],
             question=state["message"],
             transcript_owner_user_id=state["resolved_owner_user_id"],
         )
+
+
         answer = self.service.video_qa.answer(
             transcript=transcript,
             question=state["message"],

@@ -298,6 +298,8 @@ async function selectHistory(id) {
 
     // 切到聊天视图并回填数据
     currentView.value = 'chat'
+    currentConversationId.value = id
+    currentVideoId.value = data.videoId || null
     currentVideoTitle.value = data.title || '未命名视频'
     subtitleCount.value = data.subtitleCount || 0
     videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
@@ -328,6 +330,8 @@ const currentView = ref('upload') // 'upload' | 'chat'
 const videoUrl = ref('')
 const currentVideoTitle = ref('')
 const subtitleCount = ref(0)
+const currentConversationId = ref(null)
+const currentVideoId = ref(null)
 const historyView = ref('')
 const showCookieModal = ref(false)
 const showAboutModal = ref(false)
@@ -394,6 +398,8 @@ function processSseChunk(chunk) {
       // 流式完成：更新标题、字幕数，渲染最终 markdown
       currentVideoTitle.value = data.title
       subtitleCount.value = data.subtitleCount || 0
+      currentConversationId.value = data.conversationId || null
+      currentVideoId.value = data.videoId || null
       const idx = messages.value.findIndex(m => m.isStreaming)
       if (idx !== -1) {
         messages.value[idx] = {
@@ -462,6 +468,8 @@ async function startSummary() {
     if (status === 1) {
       currentVideoTitle.value = res.data.title
       subtitleCount.value = res.data.subtitleCount || 0
+      currentConversationId.value = res.data.conversationId || null
+      currentVideoId.value = res.data.videoId || null
       messages.value = [{
         role: 'ai',
         content: renderMarkdown(res.data.summary || '')
@@ -530,6 +538,8 @@ async function startSummary() {
 function backToUpload() {
   currentView.value = 'upload'
   videoUrl.value = ''
+  currentConversationId.value = null
+  currentVideoId.value = null
   messages.value = [...defaultMessages]
 }
 
@@ -594,26 +604,55 @@ const inputMessage = ref('')
 const defaultMessages = []
 const messages = ref([])
 
-function sendMessage() {
+async function sendMessage() {
   const text = inputMessage.value.trim()
   if (!text) return
 
+  if (!currentConversationId.value) {
+    alert('请先提交视频并等待总结完成后再进行对话')
+    return
+  }
+
+  // 1. 添加用户消息到UI
   messages.value.push({ role: 'user', content: text })
   inputMessage.value = ''
   autoResize()
+  nextTick(() => scrollToBottom())
 
-  // TODO: 调用后端 API 发送消息
-  // 模拟 AI 回复
-  setTimeout(() => {
+  // 2. 调用后端对话API
+  try {
+    const res = await request.post('/agent/chat', {
+      conversationId: currentConversationId.value,
+      message: text
+    })
+
+    if (res.code !== 200) {
+      messages.value.push({
+        role: 'ai',
+        content: '对话请求失败: ' + (res.message || '未知错误')
+      })
+      scrollToBottom()
+      return
+    }
+
+    // 3. 添加AI回复到UI（渲染markdown）
     messages.value.push({
       role: 'ai',
-      // 模拟回复也走 markdown 渲染
-      content: renderMarkdown(`这是关于您提问的回复。相关时间点 **08:45** 处有详细讲解。\n\n\`\`\`python\nprint("hello")\n\`\`\``),
+      content: renderMarkdown(res.data.answer || '')
     })
     scrollToBottom()
-  }, 800)
 
-  nextTick(() => scrollToBottom())
+    // 4. 刷新历史记录列表（更新最新对话时间）
+    loadHistory()
+
+  } catch (error) {
+    console.error('对话请求失败:', error)
+    messages.value.push({
+      role: 'ai',
+      content: '抱歉，请求AI服务时出错，请稍后重试。'
+    })
+    scrollToBottom()
+  }
 }
 
 function scrollToBottom() {

@@ -123,7 +123,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         List<Message> list = messageMapper.selectList(
             Wrappers.<Message>lambdaQuery()
                 .eq(Message::getConversationId, id)
-                .orderByDesc(Message::getCreatedAt)
+                .orderByAsc(Message::getCreatedAt)
         );
         messageVO.setMessages(list);
         return messageVO;

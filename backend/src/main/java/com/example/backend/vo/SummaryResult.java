@@ -16,4 +16,6 @@ public class SummaryResult {
     private Integer subtitleCount;
 
     private String sessionId;
+
+    private Long conversationId;
 }

@@ -27,25 +27,42 @@ class SimpleAgentService:
     conversations: dict[str, list[ChatTurn]] = field(default_factory=dict)
     transcript_store: TranscriptStore = field(default_factory=TranscriptStore)
 
+    '''
+    初始化三个agent，分别是视频总结agent、问答助手agent、图agent
+    '''
     def __post_init__(self) -> None:
         self.video_summarizer = VideoSummarizer(self.llm_client)
         self.video_qa = VideoQA(self.llm_client)
         self.agent_graph = AgentGraphRunner(self)
 
+    '''
+    对话函数
+    '''
     def chat(self, user_id: str, session_id: str, message: str) -> dict:
         conversation_key = f"{user_id}:{session_id}"
+        '''
+        载入记忆
+        '''
         history = self._get_or_load_history(
             conversation_key=conversation_key,
             user_id=user_id,
             session_id=session_id,
         )
 
+        '''
+        把message内容包装成一个完整的带role和content的对话类
+        '''
         user_turn = ChatTurn(role="user", content=message)
         history.append(user_turn)
         self.conversation_repository.add_turn(user_id, session_id, user_turn)
 
+        '''
+        模拟一次对话
+        '''
         answer = self._generate_answer(user_id=user_id, message=message, history=history)
         assistant_turn = ChatTurn(role="assistant", content=answer)
+
+
         history.append(assistant_turn)
         self.conversation_repository.add_turn(user_id, session_id, assistant_turn)
 
@@ -151,6 +168,12 @@ class SimpleAgentService:
         video_id: str,
         owner_user_id: str = DEFAULT_OWNER_USER_ID,
     ) -> dict:
+        '''
+        进行视频总结，调用/services/video_summarizer
+        :param video_id:
+        :param owner_user_id:
+        :return:
+        '''
         resolved_owner_user_id = self._ensure_video_loaded(
             video_id=video_id,
             owner_user_id=owner_user_id,
@@ -290,6 +313,16 @@ class SimpleAgentService:
         session_id: str,
         video_id: str | None = None,
     ) -> list[ChatTurn]:
+
+        '''
+        如果短期记忆库里找不到key，则新建一个session作为短期记忆
+        否则返回原有的记忆
+        :param conversation_key:
+        :param user_id:
+        :param session_id:
+        :param video_id:
+        :return:
+        '''
         if conversation_key not in self.conversations:
             self.conversations[conversation_key] = self.conversation_repository.recent_turns(
                 user_id=user_id,
@@ -298,10 +331,13 @@ class SimpleAgentService:
             )
         return self.conversations[conversation_key]
 
+    '''
+    纯文字对话时的系统提示词，没有视频以及字幕检索，单纯满足上下文要求
+    '''
     def _generate_answer(self, user_id: str, message: str, history: list[ChatTurn]) -> str:
         messages = [
             {
-                "role": "user",
+                "role": "system",
                 "content": (
                     "You are VideoMind, an AI video learning assistant. "
                     "Answer in Chinese. Be concise and helpful."

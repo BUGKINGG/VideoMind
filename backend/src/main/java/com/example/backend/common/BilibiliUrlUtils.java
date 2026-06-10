@@ -37,4 +37,34 @@ public class BilibiliUrlUtils {
         }
         return 1;
     }
+
+    /**
+     * 从B站URL中提取BV号
+     * 支持格式: https://www.bilibili.com/video/BV1xxxxx / https://b23.tv/BV1xxxxx
+     */
+    public static String extractBvid(String rawUrl) {
+        if (rawUrl == null || rawUrl.isEmpty()) {
+            return null;
+        }
+        String baseUrl = extractBaseUrl(rawUrl);
+        // 匹配 /BV 开头的一段
+        int bvIdx = baseUrl.toUpperCase().indexOf("/BV");
+        if (bvIdx > 0) {
+            String afterBv = baseUrl.substring(bvIdx + 1);
+            // BV号通常是10位，如 BV1xx411c7mD
+            int endIdx = 0;
+            for (int i = 0; i < afterBv.length(); i++) {
+                char c = afterBv.charAt(i);
+                if (Character.isLetterOrDigit(c)) {
+                    endIdx = i + 1;
+                } else {
+                    break;
+                }
+            }
+            if (endIdx > 2) {
+                return afterBv.substring(0, endIdx);
+            }
+        }
+        return null;
+    }
 }

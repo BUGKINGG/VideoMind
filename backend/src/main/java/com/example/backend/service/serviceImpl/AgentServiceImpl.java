@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
 import com.example.backend.common.BilibiliUrlUtils;
+import com.example.backend.dto.ChatDTO;
 import com.example.backend.dto.SummaryDTO;
 import com.example.backend.entity.Conversation;
 import com.example.backend.entity.Message;
@@ -14,6 +15,7 @@ import com.example.backend.mapper.MessageMapper;
 import com.example.backend.mapper.SubtitleMapper;
 import com.example.backend.mapper.VideoMapper;
 import com.example.backend.service.AgentService;
+import com.example.backend.vo.ChatResult;
 import com.example.backend.vo.SummaryResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -62,6 +64,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // key: sessionId, value: videoId
     // 用于建立 sessionId 与视频记录的映射，推送时知道更新哪条记录
     private final Map<String, Long> sidToVideoId = new ConcurrentHashMap<>();
+
+    // key: videoId, value: agentVideoId (如 BV1xx_p1)
+    // 用于对话时定位 Python Agent 中的视频记录
+    private final Map<Long, String> videoIdToAgentVideoId = new ConcurrentHashMap<>();
+
     @Autowired
     private MessageMapper messageMapper;
 
@@ -98,6 +105,15 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         if (exist != null) {
             log.info("[Summary] 命中缓存: videoId={}, title={}, url={}, part={}",
                 exist.getId(), exist.getTitle(), exist.getUrl(), exist.getPart());
+            // 查询对应的conversation
+            Conversation existConv = conversationMapper.selectOne(
+                Wrappers.<Conversation>lambdaQuery()
+                    .eq(Conversation::getVideoId, exist.getId())
+                    .eq(Conversation::getUserId, userId)
+                    .eq(Conversation::getStatus, 1)
+                    .orderByDesc(Conversation::getCreatedAt)
+                    .last("LIMIT 1")
+            );
             SummaryResult cache = new SummaryResult();
             cache.setVideoId(exist.getId());
             // 命中缓存，不需要 SSE
@@ -106,6 +122,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             cache.setTitle(exist.getTitle());
             cache.setSummary(exist.getSummary());
             cache.setSubtitleCount(exist.getSubtitleCount());
+            if (existConv != null) {
+                cache.setConversationId(existConv.getId());
+            }
             return cache;
         }
 
@@ -255,6 +274,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             // 调用 Agent 服务进行字幕处理和总结
             // video_id 使用 bvid + "_p" + part 格式，确保唯一性
             String agentVideoId = (bvid != null ? bvid : "video") + "_p" + part;
+            videoIdToAgentVideoId.put(videoId, agentVideoId);
             String transcriptText = fullText.toString();
             System.out.println("[Agent] 调用process: video_id=" + agentVideoId
                 + ", title长度=" + (title != null ? title.length() : 0)
@@ -342,7 +362,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 }
             }
             // 最后推送完成事件，携带完整数据
-            pushDone(sid, videoId, title, summary, count);
+            pushDone(sid, videoId, conversationId, title, summary, count);
 
         } catch (Exception e) {
             // 标记失败，避免前端无限等待
@@ -381,13 +401,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * SSE 流式推送：完成事件
      * 携带完整的视频数据和总结内容，前端收到后标记流式结束
      */
-    private void pushDone(String sid, Long videoId, String title, String summary, int count) {
+    private void pushDone(String sid, Long videoId, Long conversationId, String title, String summary, int count) {
         SseEmitter emitter = emitters.get(sid);
         if (emitter == null) return;
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("type", "done");
             payload.put("videoId", videoId);
+            payload.put("conversationId", conversationId);
             payload.put("title", title);
             payload.put("summary", summary);
             payload.put("subtitleCount", count);
@@ -417,5 +438,124 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             log.error("SSE error 推送失败, sid={}", sid);
             cleanSid(sid);
         }
+    }
+
+    /**
+     * 视频对话问答
+     * 1. 根据conversationId找到对应的video
+     * 2. 构造agentVideoId，调用Python Agent的/api/chat
+     * 3. 保存用户消息和AI回复到message表
+     * 4. 更新conversation的更新时间
+     */
+    @Override
+    public ChatResult chat(ChatDTO chatDTO) {
+        Long userId = BaseContext.getCurrentId();
+        Long conversationId = chatDTO.getConversationId();
+        String message = chatDTO.getMessage();
+
+        log.info("[Chat] userId={}, conversationId={}, message={}", userId, conversationId, message);
+
+        // 1. 查询conversation获取videoId
+        Conversation conversation = conversationMapper.selectById(conversationId);
+        if (conversation == null) {
+            throw new RuntimeException("对话记录不存在");
+        }
+        if (!conversation.getUserId().equals(userId)) {
+            throw new RuntimeException("无权访问该对话");
+        }
+
+        Long videoId = conversation.getVideoId();
+        Video video = videoMapper.selectById(videoId);
+        if (video == null) {
+            throw new RuntimeException("视频记录不存在");
+        }
+
+        // 2. 构造agentVideoId
+        String agentVideoId = videoIdToAgentVideoId.get(videoId);
+        if (agentVideoId == null) {
+            // fallback: 从url提取bvid
+            String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
+            if (bvid == null) {
+                throw new RuntimeException("无法确定视频标识，请重新提交视频链接");
+            }
+            agentVideoId = bvid + "_p" + video.getPart();
+        }
+
+        // 3. 调用Python Agent /api/chat
+        String sessionId = conversationId.toString();
+        Map<String, Object> chatReq = new HashMap<>();
+        chatReq.put("user_id", String.valueOf(userId));
+        chatReq.put("session_id", sessionId);
+        chatReq.put("video_id", agentVideoId);
+        chatReq.put("question", message);
+
+        Map<String, Object> agentResult;
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
+
+            URL agentUrl = new URL(agentServiceUrl + "/api/chat");
+            HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setDoOutput(true);
+            conn.setDoInput(true);
+            conn.setFixedLengthStreamingMode(bodyBytes.length);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bodyBytes);
+                os.flush();
+            }
+
+            int responseCode = conn.getResponseCode();
+            InputStream responseStream = (responseCode < 400)
+                ? conn.getInputStream()
+                : conn.getErrorStream();
+            agentResult = mapper.readValue(responseStream, Map.class);
+            conn.disconnect();
+
+            log.info("[Chat] Agent返回: {}", agentResult);
+        } catch (Exception e) {
+            log.error("[Chat] 调用Agent服务失败", e);
+            throw new RuntimeException("AI服务调用失败: " + e.getMessage());
+        }
+
+        String answer = (agentResult != null && agentResult.get("answer") != null)
+            ? (String) agentResult.get("answer")
+            : "抱歉，AI暂时无法回答您的问题。";
+
+        // 4. 保存用户消息
+        Message userMsg = new Message();
+        userMsg.setConversationId(conversationId);
+        userMsg.setRole("user");
+        userMsg.setContent(message);
+        userMsg.setCreatedAt(LocalDateTime.now());
+        messageMapper.insert(userMsg);
+
+        // 5. 保存AI回复
+        Message aiMsg = new Message();
+        aiMsg.setConversationId(conversationId);
+        aiMsg.setRole("ai");
+        aiMsg.setContent(answer);
+        aiMsg.setCreatedAt(LocalDateTime.now());
+        messageMapper.insert(aiMsg);
+
+        // 6. 更新conversation时间
+        Conversation updateConv = new Conversation();
+        updateConv.setId(conversationId);
+        updateConv.setUpdatedAt(LocalDateTime.now());
+        conversationMapper.updateById(updateConv);
+
+        // 7. 构建返回结果
+        ChatResult result = new ChatResult();
+        result.setAnswer(answer);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> sources = (List<Map<String, Object>>) agentResult.get("sources");
+        result.setSources(sources);
+
+        return result;
     }
 }

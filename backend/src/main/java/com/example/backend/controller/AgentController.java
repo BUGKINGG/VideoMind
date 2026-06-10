@@ -1,8 +1,10 @@
 package com.example.backend.controller;
 
 import com.example.backend.common.Result;
+import com.example.backend.dto.ChatDTO;
 import com.example.backend.dto.SummaryDTO;
 import com.example.backend.service.AgentService;
+import com.example.backend.vo.ChatResult;
 import com.example.backend.vo.SummaryResult;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -38,5 +40,13 @@ public class AgentController {
     @GetMapping(value = "/summary/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestParam String sid) {
         return agentService.connectSse(sid);
+    }
+
+    @PostMapping("/chat")
+    @Operation(summary = "视频对话问答")
+    public Result<ChatResult> chat(@RequestBody ChatDTO chatDTO) {
+        log.info("收到对话请求: conversationId={}, message={}", chatDTO.getConversationId(), chatDTO.getMessage());
+        ChatResult result = agentService.chat(chatDTO);
+        return Result.success(result);
     }
 }

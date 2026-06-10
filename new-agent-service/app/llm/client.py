@@ -9,6 +9,9 @@ from app.core.config import LLMConfig, get_llm_config
 
 
 class LLMClient:
+    '''
+    抽象方法，只是接口，在下面实现
+    '''
     def generate(self, messages: list[dict[str, str]]) -> str:
         raise NotImplementedError
 
@@ -29,6 +32,9 @@ class AnthropicLLMClient(LLMClient):
                 "ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in .env."
             )
 
+        '''
+        调用deepseek的flash接口，用的是openAi的格式
+        '''
         url = self.config.base_url.rstrip("/") + "/v1/chat/completions"
         payload = {
             "model": self.config.model,
