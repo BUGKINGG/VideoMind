@@ -6,6 +6,7 @@ import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
 import com.example.backend.entity.Conversation;
 import com.example.backend.entity.User;
+import com.example.backend.vo.MessageVO;
 
 import java.util.List;
 
@@ -36,4 +37,11 @@ public interface UserService extends IService<User> {
      * @return
      */
     List<Conversation> getList();
+
+    /**
+     * 获得具体的历史对话记录
+     * @param id
+     * @return
+     */
+    MessageVO getMessages(Long id);
 }

@@ -8,12 +8,18 @@ import com.example.backend.common.BaseContext;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
 import com.example.backend.entity.Conversation;
+import com.example.backend.entity.Message;
+import com.example.backend.entity.Video;
 import com.example.backend.mapper.ConversationMapper;
+import com.example.backend.mapper.MessageMapper;
 import com.example.backend.mapper.UserMapper;
+import com.example.backend.mapper.VideoMapper;
 import com.example.backend.service.UserService;
 import com.example.backend.entity.User;
+import com.example.backend.vo.MessageVO;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +35,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private UserMapper userMapper;
     @Autowired
     private ConversationMapper conversationMapper;
+    @Autowired
+    private VideoMapper videoMapper;
+    @Autowired
+    private MessageMapper messageMapper;
 
     @Override
     public boolean register(RegisterDTO registerDTO) {
@@ -100,5 +110,22 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 .orderByDesc(Conversation::getUpdatedAt)
         );
         return list;
+    }
+
+    @Override
+    public MessageVO getMessages(Long id){
+        Conversation conversation = conversationMapper.selectOne(
+            Wrappers.<Conversation>lambdaQuery()
+                .eq(Conversation::getId, id)
+        );
+        MessageVO messageVO = new MessageVO();
+        BeanUtils.copyProperties(conversation, messageVO);
+        List<Message> list = messageMapper.selectList(
+            Wrappers.<Message>lambdaQuery()
+                .eq(Message::getConversationId, id)
+                .orderByDesc(Message::getCreatedAt)
+        );
+        messageVO.setMessages(list);
+        return messageVO;
     }
 }

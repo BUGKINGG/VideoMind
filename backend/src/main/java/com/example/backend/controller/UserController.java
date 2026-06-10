@@ -4,11 +4,13 @@ import com.example.backend.dto.CookieDTO;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
 import com.example.backend.entity.Conversation;
+import com.example.backend.entity.Message;
 import com.example.backend.entity.User;
 import com.example.backend.service.UserService;
 import com.example.backend.vo.LoginVO;
 import com.example.backend.common.JwtUtils;
 import com.example.backend.common.Result;
+import com.example.backend.vo.MessageVO;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
@@ -92,5 +94,11 @@ public class UserController {
         log.info("获取历史记录");
         List<Conversation> list = userService.getList();
         return Result.success(list);
+    }
+
+    @GetMapping("/conversation/{id}")
+    public Result<MessageVO> showMessage(@PathVariable Long id){
+        MessageVO messageVO = userService.getMessages(id);
+        return Result.success(messageVO);
     }
 }

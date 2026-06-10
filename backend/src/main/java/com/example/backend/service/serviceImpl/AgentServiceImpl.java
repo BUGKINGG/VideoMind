@@ -313,6 +313,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             conversation.setTitle(title);
             conversation.setVideoId(videoId);
             conversation.setStatus(1);
+            conversation.setSubtitleCount(count);
             conversation.setCreatedAt(LocalDateTime.now());
             conversation.setUpdatedAt(LocalDateTime.now());
             conversationMapper.insert(conversation);

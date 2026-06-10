@@ -278,7 +278,7 @@ async function loadHistory() {
 async function selectHistory(id) {
   activeHistoryId.value = id
   try {
-    const res = await request.get(`api/history/${is}`)
+    const res = await request.get(`user/conversation/${id}`)
     if(res.code !== 200){
       alert("加载失败：" + res.message)
       return
@@ -298,11 +298,25 @@ async function selectHistory(id) {
 
     // 切到聊天视图并回填数据
     currentView.value = 'chat'
-    currentVideoTitle.value = data.title
+    currentVideoTitle.value = data.title || '未命名视频'
     subtitleCount.value = data.subtitleCount || 0
     videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
+
+    if(data.messages && data.messages.length > 0){
+      messages.value = data.messages.map(msg => ({
+        role: msg.role,
+        content: msg.role ===  'ai' ? renderMarkdown(msg.content) : msg.content
+      }))
+    }else {
+      messages.value = [{
+        role: 'ai',
+        content: renderMarkdown(data.summary || '暂无总结')
+      }]
+    }
+
+    nextTick(() => scrollToBottom())
   }catch (e) {
-    console.error("加载记录失败", )
+    console.error("加载记录失败", e)
     alert('加载失败')
   }
 }

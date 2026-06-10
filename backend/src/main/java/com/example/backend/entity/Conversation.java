@@ -27,6 +27,9 @@ public class Conversation {
     @TableField("status")
     private Integer status;
 
+    @TableField(value = "subtitle_count")
+    private Integer subtitleCount;
+
     @TableField(value = "created_at", fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 
