@@ -7,6 +7,8 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
+import com.example.backend.entity.Conversation;
+import com.example.backend.mapper.ConversationMapper;
 import com.example.backend.mapper.UserMapper;
 import com.example.backend.service.UserService;
 import com.example.backend.entity.User;
@@ -16,6 +18,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
@@ -24,6 +27,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private BCryptPasswordEncoder bCryptPasswordEncoder;
     @Autowired
     private UserMapper userMapper;
+    @Autowired
+    private ConversationMapper conversationMapper;
 
     @Override
     public boolean register(RegisterDTO registerDTO) {
@@ -83,5 +88,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             .set(User::getCookie, cookie);
 
         userMapper.update(null, wrapper);
+    }
+
+    @Override
+    public List<Conversation> getList(){
+        Long userId = BaseContext.getCurrentId();
+        List<Conversation> list = conversationMapper.selectList(
+            Wrappers.<Conversation>lambdaQuery()
+                .eq(Conversation::getUserId, userId)
+                .eq(Conversation::getStatus, 1)
+                .orderByDesc(Conversation::getUpdatedAt)
+        );
+        return list;
     }
 }

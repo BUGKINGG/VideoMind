@@ -5,8 +5,12 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
 import com.example.backend.common.BilibiliUrlUtils;
 import com.example.backend.dto.SummaryDTO;
+import com.example.backend.entity.Conversation;
+import com.example.backend.entity.Message;
 import com.example.backend.entity.Subtitle;
 import com.example.backend.entity.Video;
+import com.example.backend.mapper.ConversationMapper;
+import com.example.backend.mapper.MessageMapper;
 import com.example.backend.mapper.SubtitleMapper;
 import com.example.backend.mapper.VideoMapper;
 import com.example.backend.service.AgentService;
@@ -25,7 +29,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,6 +48,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private RestTemplate restTemplate;
     @Autowired
     private SubtitleMapper subtitleMapper;
+    @Autowired
+    private ConversationMapper conversationMapper;
 
     @Value("${agent.service.url:http://localhost:8765}")
     private String agentServiceUrl;
@@ -57,6 +62,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // key: sessionId, value: videoId
     // 用于建立 sessionId 与视频记录的映射，推送时知道更新哪条记录
     private final Map<String, Long> sidToVideoId = new ConcurrentHashMap<>();
+    @Autowired
+    private MessageMapper messageMapper;
 
     /**
      * 提交总结任务（同步入口）
@@ -299,6 +306,25 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             finish.setStatus(1);
             finish.setSubtitleCount(count);
             videoMapper.updateById(finish);
+
+            // 创建conversation表并且保存
+            Conversation conversation = new Conversation();
+            conversation.setUserId(userId);
+            conversation.setTitle(title);
+            conversation.setVideoId(videoId);
+            conversation.setStatus(1);
+            conversation.setCreatedAt(LocalDateTime.now());
+            conversation.setUpdatedAt(LocalDateTime.now());
+            conversationMapper.insert(conversation);
+
+            // 创建message表，插入summary数据并且保存
+            Long conversationId = conversation.getId();
+            Message message = new Message();
+            message.setRole("ai");
+            message.setContent(summary);
+            message.setConversationId(conversationId);
+            message.setCreatedAt(LocalDateTime.now());
+            messageMapper.insert(message);
 
             // ========== SSE 流式推送总结给前端 ==========
             // 把总结内容逐段推送，模拟流式打字机效果

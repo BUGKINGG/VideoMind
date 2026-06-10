@@ -3,6 +3,7 @@ package com.example.backend.controller;
 import com.example.backend.dto.CookieDTO;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
+import com.example.backend.entity.Conversation;
 import com.example.backend.entity.User;
 import com.example.backend.service.UserService;
 import com.example.backend.vo.LoginVO;
@@ -12,10 +13,9 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 
 @RestController
@@ -84,5 +84,13 @@ public class UserController {
         log.info("更新cookie：{}", cookie);
         userService.updateCookie(cookie);
         return Result.success();
+    }
+
+    @GetMapping("/conversation/list")
+    @Operation(summary = "获取用户历史记录")
+    public Result<List<Conversation>> conversationList() {
+        log.info("获取历史记录");
+        List<Conversation> list = userService.getList();
+        return Result.success(list);
     }
 }

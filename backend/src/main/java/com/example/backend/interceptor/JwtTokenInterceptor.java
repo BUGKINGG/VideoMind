@@ -17,7 +17,17 @@ public class JwtTokenInterceptor implements HandlerInterceptor {
     @Autowired
     private JwtUtils jwtUtils;
 
-    // 拦截器方法
+    /**
+     * 拦截器方法
+     * 用于接收前端发来的请求是否带了token
+     * 如果没带则code返回401
+     * 否则在token中解析出userId放入线程上下文BaseContext
+     * @param request
+     * @param response
+     * @param handler
+     * @return
+     * @throws Exception
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         String token = request.getHeader("token");

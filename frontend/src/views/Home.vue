@@ -219,18 +219,95 @@ const userInitials = computed(() => {
 
 // ========== 历史记录 ==========
 const activeHistoryId = ref(1)
-const historyList = ref([
-  { id: 1, title: 'LangChain Agent 深度解析...', time: '2小时前' },
-  { id: 2, title: 'Spring Boot 微服务架构实战', time: '昨天' },
-  { id: 3, title: '高等代数技巧选讲 - 第3讲', time: '3天前' },
-  { id: 4, title: 'React 18 并发模式原理', time: '1周前' },
-  { id: 5, title: '微分方程数值解法 - Lanczos', time: '2周前' },
-])
+const historyList = ref([ ])
 
-function selectHistory(id) {
-  activeHistoryId.value = id
-  // TODO: 加载对应历史会话
+/**
+ * 格式化返回时间
+ * @param timeStr
+ * @returns {string}
+ */
+function formatTime(timeStr) {
+  const date = new Date(timeStr)
+  const now = new Date()
+  const diff = Math.floor((now - date)/1000)
+
+  if (diff < 60) return '刚刚'
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
+  if (diff < 604800) return `${Math.floor(diff / 86400)}天前`
+  return date.toLocaleDateString()
 }
+
+/**
+ * 获得历史记录列表
+ * @returns {Promise<void>}
+ */
+async function loadHistory() {
+  try {
+    const res = await request.get('/user/conversation/list')
+    if(res.code === 200) {
+      /**
+       * 后端返回JSON格式为
+       * {
+       *   "code": 200,
+       *   "data": {
+       *     "id": 1,
+       *     "title": "LangChain Agent 深度解析...",
+       *     "summary": "## 1. 一句话总结\n...",
+       *     "subtitleCount": 154,
+       *     "url": "https://www.bilibili.com/video/BV1xx",
+       *     "part": 1,
+       *     "status": 1,
+       *     "createTime": "2026-06-10T10:30:00"
+       *   }
+       * }
+       */
+      historyList.value = res.data.map(item => ({
+        id: item.id,
+        title: item.title || '未命名视频',
+        time: formatTime(item.createdAt) || '未知时间',
+        status: item.status
+      }))
+    }
+  } catch (e){
+    console.log("历史记录加载失败", e)
+  }
+}
+
+
+async function selectHistory(id) {
+  activeHistoryId.value = id
+  try {
+    const res = await request.get(`api/history/${is}`)
+    if(res.code !== 200){
+      alert("加载失败：" + res.message)
+      return
+    }
+
+    const data = res.data
+
+    if (data.status === 0 ) {
+      alert("视频还在处理中，请稍后")
+      return
+    }
+
+    if (data.status === 2) {
+      alert('视频解析失败，请重新提交')
+      return
+    }
+
+    // 切到聊天视图并回填数据
+    currentView.value = 'chat'
+    currentVideoTitle.value = data.title
+    subtitleCount.value = data.subtitleCount || 0
+    videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
+  }catch (e) {
+    console.error("加载记录失败", )
+    alert('加载失败')
+  }
+}
+
+loadHistory()
 
 // ========== 视图切换 ==========
 const currentView = ref('upload') // 'upload' | 'chat'
@@ -331,6 +408,7 @@ function processSseChunk(chunk) {
     // 单条消息格式不对不中断整个流，打印调试
     console.error('[SSE] 单条消息解析失败:', e, '原始数据:', chunk)
   }
+
 }
 
 /**
@@ -430,6 +508,8 @@ async function startSummary() {
       isLoading.value = false
       confirm_text.value = '开始总结'
     }
+
+    loadHistory()
   }
 }
 
