@@ -1,12 +1,15 @@
-import requests
-import re
-import time
+import asyncio
 import json
 import os
-from typing import List, Dict, Any
+import re
+import time
+from typing import Any, Dict, List
+
+import requests
+import uvicorn
+from bilibili_api import Credential, video
 from fastapi import FastAPI
 from pydantic import BaseModel
-import uvicorn
 
 app = FastAPI(title="VideoMind Python Service")
 
@@ -23,84 +26,31 @@ def extract_bvid(url: str) -> str:
     return m.group(1)
 
 
-def get_video_info(bvid: str, part: int = 1):
-    url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-    print(f"[DEBUG] 请求视频信息: bvid={bvid}, part={part}, url={url}")
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    data = resp.json()
-    print(f"[DEBUG] 视频信息返回: code={data.get('code')}, title={data.get('data',{}).get('title','N/A')}")
-    if data.get("code") != 0:
-        raise RuntimeError(f"获取视频信息失败: {data.get('message')}")
+def pick_chinese_subtitle(subs: List[Dict]) -> List[Dict]:
+    """
+    只保留中文字幕轨道。
+    优先级：ai-zh > zh-CN/zh > 其他 zh*。
+    如果完全没有中文，fallback 取第一个并打警告（避免直接报错）。
+    """
+    if not subs:
+        return []
 
-    d = data["data"]
-    aid = d["aid"]
-    title = d["title"]
+    # 1. 最优先：AI 中文
+    for s in subs:
+        if s.get("lan") == "ai-zh":
+            return [s]
 
-    # 分P处理：B站 pages 数组里 page 字段就是 P 数
-    pages = d.get("pages", [])
-    print(f"[DEBUG] 视频分P信息: pages数量={len(pages)}, 请求part={part}")
-    if pages:
-        target = next((p for p in pages if p.get("page") == part), pages[0])
-        cid = target["cid"]
-        part_name = target.get("part", "")
-        actual_page = target.get("page", 1)
-        print(f"[DEBUG] 选中分P: page={actual_page}, cid={cid}, part_name={part_name}")
-        if part_name and len(pages) > 1:
-            title = f"{title} P{part} {part_name}"
-    else:
-        cid = d.get("cid")
+    # 2. 其次：人工中文（zh-CN, zh, zh-HK, zh-TW...）
+    zh_subs = [s for s in subs if s.get("lan", "").startswith("zh")]
+    if zh_subs:
+        return zh_subs
 
-    return aid, cid, title
-
-
-
-def get_subtitles(
-    bvid: str, cid: int, aid: int, cookies: Dict[str, str], retry: bool = True
-):
-    """获取字幕元数据列表（带aid参数，空URL时自动重试）"""
-    url = f"https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}&aid={aid}"
-    print(f"[DEBUG] 请求字幕: bvid={bvid}, cid={cid}, aid={aid}")
-    resp = requests.get(url, headers=HEADERS, cookies=cookies, timeout=15)
-    data = resp.json()
-
-    print(f"[调试] B站API返回: {data}")
-
-    if data.get("code") != 0:
-        raise RuntimeError(f"获取播放器信息失败: {data.get('message')}")
-
-    subs = data.get("data", {}).get("subtitle", {}).get("subtitles", [])
-    print(f"[调试] 原始字幕列表: {subs}")
-
-    # 检查是否有空URL的字幕，有则重试一次（B站接口延迟问题）
-    has_empty = any(not s.get("subtitle_url") for s in subs)
-    if has_empty and retry:
-        print(f"[DEBUG] 发现空URL字幕，2秒后重试...")
-        time.sleep(2)
-        return get_subtitles(bvid, cid, aid, cookies, retry=False)
-
-    # 过滤掉空的
-    valid_subs = [s for s in subs if s.get("subtitle_url")]
-    print(f"[调试] 过滤后有效字幕: {valid_subs}")
-    return valid_subs
-
-
-def fetch_subtitle_body(sub_url: str) -> List[Dict[str, Any]]:
-    """直接拉取字幕JSON内容，返回body数组"""
-    if sub_url.startswith("//"):
-        sub_url = "https:" + sub_url
-    elif not sub_url.startswith("http"):
-        raise ValueError(f"非法的字幕URL: {sub_url!r}")
-
-    print(f"[DEBUG] 拉取字幕内容: {sub_url[:80]}...")
-    resp = requests.get(sub_url, headers=HEADERS, timeout=15)
-    sub_data = resp.json()
-    body = sub_data.get("body", [])
-    print(f"[DEBUG] 字幕内容条数: {len(body)}")
-    return body
-
+    # 3. 兜底（调试阶段建议保留，方便看到底有哪些轨道）
+    print(f"[警告] 未找到中文字幕，可用轨道: {[s.get('lan') for s in subs]}，fallback 取第一个")
+    return [subs[:1]]  # 只取第一个，避免多轨道都下载
 
 def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
-    """把 'SESSDATA=xxx; bili_jct=yyy' 转成 requests 用的 dict"""
+    """把 'SESSDATA=xxx; bili_jct=yyy' 转成 dict"""
     cookies = {}
     if not cookie_str:
         return cookies
@@ -112,17 +62,100 @@ def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
     return cookies
 
 
+def build_credential(cookie_str: str) -> Credential | None:
+    """从 cookie 字符串构建 bilibili-api 的 Credential"""
+    if not cookie_str:
+        return None
+    # Java 端可能只传了纯 SESSDATA 值（不含 =）
+    if "=" not in cookie_str:
+        return Credential(sessdata=cookie_str)
+    cookies = parse_cookie_string(cookie_str)
+    return Credential(
+        sessdata=cookies.get("SESSDATA", ""),
+        bili_jct=cookies.get("bili_jct", ""),
+        buvid3=cookies.get("buvid3", ""),
+    )
+
+
+async def get_video_info_async(bvid: str, part: int = 1, credential=None):
+    """使用 bilibili-api-python 获取视频信息（自动处理 WBI 签名）"""
+    print(f"[DEBUG] 请求视频信息: bvid={bvid}, part={part}")
+    v = video.Video(bvid=bvid, credential=credential)
+    info = await v.get_info()
+
+    aid = info["aid"]
+    title = info["title"]
+    pages = info.get("pages", [])
+
+    # 防御：强制转 int 并排序
+    part = int(part)
+    pages = sorted(pages, key=lambda p: int(p.get("page", 999)))
+
+    print(f"[DEBUG] 视频分P信息: pages数量={len(pages)}, 请求part={part}")
+    if pages:
+        target = next(
+            (p for p in pages if int(p.get("page", 0)) == part), pages[0]
+        )
+        cid = target["cid"]
+        part_name = target.get("part", "")
+        actual_page = target.get("page", 1)
+        print(f"[DEBUG] 选中分P: page={actual_page}, cid={cid}, part_name={part_name}")
+        if part_name and len(pages) > 1:
+            title = f"{title} P{part} {part_name}"
+    else:
+        cid = info.get("cid")
+        if not cid:
+            raise RuntimeError("无法获取视频 cid")
+
+    return aid, cid, title
+
+
+async def get_subtitles_async(bvid: str, cid: int, credential=None):
+    """使用 bilibili-api-python 获取字幕元数据（自动 WBI 签名，避免被污染）"""
+    print(f"[DEBUG] 请求字幕: bvid={bvid}, cid={cid}")
+    v = video.Video(bvid=bvid, credential=credential)
+    player_info = await v.get_player_info(cid=cid)
+
+    subs = player_info.get("subtitle", {}).get("subtitles", [])
+    print(f"[DEBUG] 字幕轨道数: {len(subs)}")
+    return subs
+
+
+async def fetch_subtitle_body(sub_url: str, cookies: Dict[str, str] = None) -> List[Dict[str, Any]]:
+    """异步安全地下载字幕 JSON（在线程池中执行 requests，避免阻塞事件循环）"""
+    if sub_url.startswith("//"):
+        sub_url = "https:" + sub_url
+    elif not sub_url.startswith("http"):
+        raise ValueError(f"非法的字幕URL: {sub_url!r}")
+
+    print(f"[DEBUG] 拉取字幕内容: {sub_url[:80]}...")
+
+    def _sync_get():
+        return requests.get(
+            sub_url,
+            headers={**HEADERS, "Connection": "close"},
+            cookies=cookies or {},
+            timeout=15,
+            proxies={"http": None, "https": None},
+        )
+
+    # Python 3.9+ 可用 asyncio.to_thread；3.8 请换成 loop.run_in_executor
+    resp = await asyncio.to_thread(_sync_get)
+    sub_data = resp.json()
+    body = sub_data.get("body", [])
+    print(f"[DEBUG] 字幕内容条数: {len(body)}")
+    return body
+
+
 def save_to_files(
-    title: str, results: List[Dict[str, Any]], out_dir: str = r"D:\Projects\subs"
+        title: str, bvid: str, results: List[Dict[str, Any]], out_dir: str = r"D:\Projects\subs"
 ):
-    """
-    测试阶段：生成 JSON 和 TXT 文件到本地
-    - JSON: 完整字幕数据结构
-    - TXT: 纯 content 内容
-    """
+    """生成 JSON 和 TXT 到本地（文件名加入 BV 号 + 时间戳，防止覆盖）"""
     print(f"[调试] 进入保存函数，准备写入 {out_dir}")
     os.makedirs(out_dir, exist_ok=True)
-    safe_name = re.sub(r'[\\/:*?"<>|]', "_", title)
+    safe_title = re.sub(r'[\\/:*?"<>|]', "_", title)
+    timestamp = int(time.time())
+    safe_name = f"{safe_title}_{bvid}_{timestamp}"
 
     # 1. 保存完整 JSON
     json_path = os.path.join(out_dir, f"{safe_name}.json")
@@ -130,14 +163,14 @@ def save_to_files(
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"[测试] JSON 已保存: {json_path}")
 
-    # 2. 保存纯文本 TXT（所有 content 拼接）
+    # 2. 保存纯文本 TXT
     txt_path = os.path.join(out_dir, f"{safe_name}.txt")
     lines = []
     for track in results:
         lines.append(f"=== [{track.get('lan_doc', '未知')}] ===")
         for item in track.get("body", []):
             lines.append(item.get("content", "").strip())
-        lines.append("")  # 轨道之间空一行
+        lines.append("")
 
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -151,12 +184,12 @@ def save_to_files(
 
 class ParseRequest(BaseModel):
     url: str
-    cookie: str = ""  # 传完整的 cookie 字符串，如 "SESSDATA=xxx; bili_jct=yyy"
+    cookie: str = ""
     part: int = 1
 
 
 @app.post("/parse")
-def parse_video(req: ParseRequest):
+async def parse_video(req: ParseRequest):
     """
     Java 调用示例：
     POST http://localhost:8001/parse
@@ -165,26 +198,26 @@ def parse_video(req: ParseRequest):
     print(f"\n{'='*60}")
     print(f"[DEBUG] /parse 收到请求: url={req.url}, part={req.part}")
     print(f"[DEBUG] cookie长度: {len(req.cookie) if req.cookie else 0}")
+
     try:
         bvid = extract_bvid(req.url)
         print(f"[DEBUG] 提取到BV号: {bvid}")
-        aid, cid, title = get_video_info(bvid, req.part)
+
+        credential = build_credential(req.cookie)
+        aid, cid, title = await get_video_info_async(bvid, req.part, credential)
         print(f"[DEBUG] 视频信息: aid={aid}, cid={cid}, title={title}")
 
-        # 把前端/Java传来的 cookie 字符串转成 dict
-        cookies = parse_cookie_string(req.cookie)
-        subtitles_meta = get_subtitles(bvid, cid, aid, cookies)
-
+        subtitles_meta = await get_subtitles_async(bvid, cid, credential)
         if not subtitles_meta:
             return {"code": 200, "title": title, "bvid": bvid, "subtitles": []}
 
+        # 下载各轨道字幕
         results = []
-        for s in subtitles_meta:
+        for s in pick_chinese_subtitle(subtitles_meta):
             lang = s.get("lan", "unknown")
             lan_doc = s.get("lan_doc", "未知")
-            body = fetch_subtitle_body(s["subtitle_url"])
+            body = await fetch_subtitle_body(s["subtitle_url"])
 
-            # 清洗成 Java 方便解析的结构：start/end/content
             cleaned_body = []
             for item in body:
                 cleaned_body.append(
@@ -194,22 +227,22 @@ def parse_video(req: ParseRequest):
                         "content": item.get("content", "").strip(),
                     }
                 )
-
             results.append({"lang": lang, "lan_doc": lan_doc, "body": cleaned_body})
 
-        # ========== 测试阶段：生成本地文件 ==========
+        # 测试阶段：生成本地文件（文件名已加 BV + 时间戳，不会覆盖）
         try:
-            json_path, txt_path = save_to_files(title, results)
+            json_path, txt_path = save_to_files(title, bvid, results)
         except Exception as e:
             print(f"[警告] 文件保存失败（不影响接口返回）: {e}")
-        # ==========================================
 
-        print(f"[DEBUG] /parse 返回: title={title}, bvid={bvid}, subtitles条数={len(results)}")
+        print(
+            f"[DEBUG] /parse 返回: title={title}, bvid={bvid}, subtitles条数={len(results)}"
+        )
         return {
             "code": 200,
             "title": title,
             "bvid": bvid,
-            "subtitles": results,  # 每个元素是一个语言轨道
+            "subtitles": results,
         }
 
     except ValueError as e:
@@ -221,17 +254,16 @@ def parse_video(req: ParseRequest):
 
 
 class SummarizeRequest(BaseModel):
-    text: str  # 拼接后的完整字幕文本
-    title: str = ""  # 视频标题
+    text: str
+    title: str = ""
 
 
 @app.post("/summarize")
 def summarize(req: SummarizeRequest):
-    """Mock 视频总结 Agent，后续替换为真实 LLM/Agent 调用"""
+    """Mock 视频总结 Agent"""
     text = req.text[:1000] if req.text else "无字幕内容"
     title = req.title or "未知视频"
 
-    # Mock 逻辑：简单返回前300字 + 固定话术
     mock_summary = f"""【Mock 总结】视频《{title}》内容摘要：
 
 {text[:300]}...
@@ -240,12 +272,6 @@ def summarize(req: SummarizeRequest):
 """
     return {"code": 200, "summary": mock_summary}
 
-
-# ========== 启动命令 ==========
-# 方式1：直接运行此文件
-#   python main.py
-# 方式2：用 uvicorn 命令（推荐开发时带热重载）
-#   uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
