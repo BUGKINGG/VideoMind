@@ -244,6 +244,14 @@ const cookieValue = ref('')
 
 import { marked } from 'marked'
 
+// 配置 marked：支持换行转 <br>，禁用标题 ID 减少 DOM 抖动
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  headerIds: false,
+  mangle: false
+})
+
 // 渲染 Markdown 为 HTML
 function renderMarkdown(text) {
   return marked.parse(text || '')
@@ -286,7 +294,7 @@ function processSseChunk(chunk) {
         // 更新正在流式的消息
         const idx = messages.value.findIndex(m => m.isStreaming)
         if (idx !== -1) {
-          messages.value[idx].content = data.content
+          messages.value[idx].content = renderMarkdown(data.content)
         }
       }
       nextTick(() => scrollToBottom())
@@ -952,12 +960,15 @@ function autoResize() {
 
 .message-content {
   background: white;
-  padding: 14px 18px;
+  padding: 16px 20px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 18px;           /* 从 14px 放大 */
+  line-height: 1.8;          /* 从 1.6 放大 */
   box-shadow: var(--shadow);
+  text-align: left;          /* 强制左对齐 */
+  width: 100%;
+  color: var(--text-primary);
 }
 
 .message.user .message-content {
@@ -1227,5 +1238,152 @@ function autoResize() {
 }
 .modal-btn.secondary:hover {
   background: #f8fafc;
+}
+/* ========== Markdown 强制左对齐 + 字号保护 ========== */
+:deep(.markdown-body),
+:deep(.markdown-body *) {
+  text-align: left !important;
+}
+
+:deep(.markdown-body) {
+  font-size: 18px;
+  line-height: 1.8;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+/* 标题 */
+:deep(.markdown-body h1) {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 20px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+:deep(.markdown-body h2) {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 18px 0 10px;
+}
+
+:deep(.markdown-body h3) {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--primary);
+  margin: 16px 0 8px;
+}
+
+/* 段落 */
+:deep(.markdown-body p) {
+  margin-bottom: 12px;
+}
+
+/* 列表 */
+:deep(.markdown-body ul),
+:deep(.markdown-body ol) {
+  padding-left: 24px;
+  margin-bottom: 12px;
+}
+
+:deep(.markdown-body li) {
+  margin-bottom: 6px;
+}
+
+:deep(.markdown-body ul li) {
+  list-style-type: disc;
+}
+
+:deep(.markdown-body ul li::marker) {
+  color: var(--primary);
+}
+
+/* 加粗 */
+:deep(.markdown-body strong) {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+/* 代码块 */
+:deep(.markdown-body pre) {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  text-align: left !important;
+}
+
+:deep(.markdown-body pre code) {
+  font-size: 13.5px;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  color: #334155;
+  background: transparent;
+  padding: 0;
+}
+
+/* 行内代码 */
+:deep(.markdown-body code) {
+  background: #eef2ff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13.5px;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  color: var(--primary);
+}
+
+/* 引用块 */
+:deep(.markdown-body blockquote) {
+  margin: 12px 0;
+  padding: 10px 16px;
+  border-left: 4px solid var(--primary);
+  background: #f8fafc;
+  border-radius: 0 8px 8px 0;
+  color: var(--text-secondary);
+}
+
+/* 表格 */
+:deep(.markdown-body table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+:deep(.markdown-body th),
+:deep(.markdown-body td) {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left !important;
+}
+
+:deep(.markdown-body th) {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+/* 分隔线 */
+:deep(.markdown-body hr) {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 18px 0;
+}
+
+/* 链接 */
+:deep(.markdown-body a) {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+:deep(.markdown-body a:hover) {
+  text-decoration: underline;
+}
+
+/* 图片 */
+:deep(.markdown-body img) {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 8px 0;
 }
 </style>
