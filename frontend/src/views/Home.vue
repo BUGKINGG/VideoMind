@@ -78,7 +78,7 @@
             />
           </div>
 
-          <button class="confirm-btn" @click="startSummary">
+          <button class="confirm-btn" @click="startSummary" :disabled="isLoading" :class="{'loading': isLoading}">
              {{ confirm_text }}
           </button>
 
@@ -104,18 +104,23 @@
         </div>
 
         <div class="chat-messages" ref="messagesContainer">
-          <div
-              v-for="(msg, index) in messages"
-              :key="index"
-              class="message"
-              :class="msg.role"
-          >
-            <div class="message-avatar">
-              {{ msg.role === 'ai' ? 'AI' : '我' }}
-            </div>
-            <div class="message-content" v-html="msg.content"></div>
-          </div>
-        </div>
+  <div
+      v-for="(msg, index) in messages"
+      :key="index"
+      class="message"
+      :class="msg.role"
+  >
+    <div class="message-avatar">
+      {{ msg.role === 'ai' ? 'AI' : '我' }}
+    </div>
+    <div class="message-content">
+      <!-- AI 消息：v-html 渲染 Markdown 转成的 HTML -->
+      <div v-if="msg.role === 'ai'" class="markdown-body" v-html="msg.content"></div>
+      <!-- 用户消息：纯文本，防止 XSS -->
+      <div v-else>{{ msg.content }}</div>
+    </div>
+  </div>
+</div>
 
         <div class="chat-input-area">
           <div class="chat-input-wrapper">
@@ -200,6 +205,7 @@ const userStore = useUserStore()
 const userName = computed(() => userStore.username || "default name")
 const userUid = ref('19241001')
 const confirm_text = ref('开始总结')
+const isLoading = ref(false)  // 新增：控制按钮禁用和加载状态
 const userInitials = computed(() => {
   return userName.value
       .split(' ')
@@ -208,6 +214,8 @@ const userInitials = computed(() => {
       .toUpperCase()
       .slice(0, 2)
 })
+
+
 
 // ========== 历史记录 ==========
 const activeHistoryId = ref(1)
@@ -234,37 +242,187 @@ const showCookieModal = ref(false)
 const showAboutModal = ref(false)
 const cookieValue = ref('')
 
+import { marked } from 'marked'
 
+// 渲染 Markdown 为 HTML
+function renderMarkdown(text) {
+  return marked.parse(text || '')
+}
+
+// 解析单条 SSE 消息，内部 try-catch 防止单条解析失败中断整个流
+function processSseChunk(chunk) {
+  if (!chunk.trim()) return
+  try {
+    const lines = chunk.split('\n')
+    let eventName = 'message'
+    let dataStr = ''
+
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim()
+      } else if (line.startsWith('data:')) {
+        dataStr = line.slice(5).trim()
+      }
+    }
+
+    if (!dataStr) return
+    const data = JSON.parse(dataStr)
+    console.log('[SSE] 收到事件:', eventName, data)  // 打开浏览器控制台看这条
+
+    if (eventName === 'connect') {
+      console.log('SSE 已连接')
+    }
+    else if (eventName === 'message' && data.type === 'chunk') {
+      // 流式内容片段：替换占位消息或更新流式消息
+      const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
+      if (placeholderIndex !== -1) {
+        // 第一次收到内容，替换占位消息
+        messages.value[placeholderIndex] = {
+          role: 'ai',
+          content: data.content,  // 流式阶段用纯文本，避免 markdown 解析不完整
+          isStreaming: true
+        }
+      } else {
+        // 更新正在流式的消息
+        const idx = messages.value.findIndex(m => m.isStreaming)
+        if (idx !== -1) {
+          messages.value[idx].content = data.content
+        }
+      }
+      nextTick(() => scrollToBottom())
+    }
+    else if (eventName === 'message' && data.type === 'done') {
+      // 流式完成：更新标题、字幕数，渲染最终 markdown
+      currentVideoTitle.value = data.title
+      subtitleCount.value = data.subtitleCount || 0
+      const idx = messages.value.findIndex(m => m.isStreaming)
+      if (idx !== -1) {
+        messages.value[idx] = {
+          role: 'ai',
+          content: renderMarkdown(data.summary || '')
+        }
+      }
+      isLoading.value = false
+      confirm_text.value = '开始总结'
+    }
+    else if (eventName === 'error') {
+      const msg = data.message || '未知错误'
+      const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
+      if (placeholderIndex !== -1) {
+        messages.value[placeholderIndex] = {
+          role: 'ai',
+          content: '处理失败: ' + msg
+        }
+      } else {
+        alert('处理失败: ' + msg)
+      }
+      isLoading.value = false
+      confirm_text.value = '开始总结'
+    }
+  } catch (e) {
+    // 单条消息格式不对不中断整个流，打印调试
+    console.error('[SSE] 单条消息解析失败:', e, '原始数据:', chunk)
+  }
+}
+
+/**
+ * 开始总结（SSE 异步版）
+ * 流程：
+ * 1. axios POST 提交任务，后端立即返回 sessionId（不阻塞）
+ * 2. 使用 fetch + ReadableStream 建立 SSE 连接，通过 Headers 携带 token
+ * 3. 实时监听后端推送，处理完成后立即展示结果
+ *
+ * 关键修复：done=true 时，buffer 中可能残留最后一条 SSE 消息，必须处理完再 break
+ */
 async function startSummary() {
   if (!videoUrl.value) {
     alert('请先上传视频或输入链接')
     return
   }
-
-  if(!userStore.cookie){
+  if (!userStore.cookie) {
     alert("请先在设置里设置cookie")
     return
   }
+  // 防重入：如果正在处理，直接忽略
+  if (isLoading.value) return
 
-  try{
+  try {
+    isLoading.value = true
     confirm_text.value = '解析中...'
+
+    // 提交任务
     const res = await request.post('/agent/summary', {
       url: videoUrl.value,
       cookie: userStore.cookie
     })
 
-    const result = res.data
+    const { sessionId, status } = res.data
 
-    currentVideoTitle.value = result.title || videoUrl.value
-    subtitleCount.value = result.subtitleCount || 0
+    // 命中缓存，直接展示
+    if (status === 1) {
+      currentVideoTitle.value = res.data.title
+      subtitleCount.value = res.data.subtitleCount || 0
+      messages.value = [{
+        role: 'ai',
+        content: renderMarkdown(res.data.summary || '')
+      }]
+      currentView.value = 'chat'
+      isLoading.value = false
+      confirm_text.value = '开始总结'
+      return
+    }
 
+    // 非缓存：立刻切换到 chat 视图，显示占位消息
     currentView.value = 'chat'
-    confirm_text.value = '开始总结'
-  }catch (error){
-    confirm_text.value = '开始总结'
-    console.log(error)
-  }
+    currentVideoTitle.value = videoUrl.value
+    subtitleCount.value = 0
+    messages.value = [{
+      role: 'ai',
+      content: '正在解析视频内容并生成总结，请稍候...',
+      isPlaceholder: true
+    }]
 
+    // 建立 SSE 连接监听流式结果
+    const response = await fetch(`/agent/summary/stream?sid=${sessionId}`, {
+      headers: { 'token': userStore.token }
+    })
+    if (!response.ok) throw new Error(`SSE 连接失败: ${response.status}`)
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+
+      // 关键修复：流结束时，把 buffer 里剩余所有消息全部处理完再 break
+      if (done) {
+        const remaining = buffer.split('\n\n')
+        for (const chunk of remaining) {
+          processSseChunk(chunk)
+        }
+        break
+      }
+
+      buffer += decoder.decode(value, { stream: true })
+      const chunks = buffer.split('\n\n')
+      buffer = chunks.pop() || ''
+
+      for (const chunk of chunks) {
+        processSseChunk(chunk)
+      }
+    }
+
+  } catch (error) {
+    console.error('总结流程异常:', error)
+    alert('请求失败: ' + (error.message || '请检查网络或登录状态'))
+  } finally {
+    // 兜底：只有按钮还在加载状态时才重置（防止成功回调已经重置过）
+    if (isLoading.value) {
+      isLoading.value = false
+      confirm_text.value = '开始总结'
+    }
+  }
 }
 
 function backToUpload() {
@@ -331,32 +489,8 @@ function handleDrop(e) {
 // ========== 聊天消息 ==========
 const messagesContainer = ref(null)
 const inputMessage = ref('')
-
-const defaultMessages = [
-  {
-    role: 'ai',
-    content: `已完成视频分析！以下是结构化总结：<br><br>
-<strong>1. Agent 核心架构</strong><br>
-视频首先介绍了 ReAct 推理模式，即 Reasoning + Acting 的循环架构。<br><br>
-<strong>2. 工具调用机制</strong><br>
-在 <span class="timestamp-badge">⏱ 04:32</span> 处详细讲解了 Tool 的注册与绑定方式。<br><br>
-<strong>3. 记忆系统设计</strong><br>
-视频后半部分重点讲解了 Short-term vs Long-term Memory 的设计权衡。`,
-  },
-  {
-    role: 'user',
-    content: '请帮我找到视频中讲解 LangGraph 状态机的部分',
-  },
-  {
-    role: 'ai',
-    content: `在 <span class="timestamp-badge">⏱ 12:15</span> 开始讲解 LangGraph 的状态机设计。讲师提到"看图我们可知，StateGraph 的核心是通过节点和边来构建有向图结构..."<br><br>
-这里我截取了该时间点的画面进行分析：<br>
-[🖼️ 截图分析占位] 图中展示了 StateGraph 的初始化流程。<br><br>
-关键要点：LangGraph 相比普通 Agent 的优势在于支持循环流程和条件分支。`,
-  },
-]
-
-const messages = ref([...defaultMessages])
+const defaultMessages = []
+const messages = ref([])
 
 function sendMessage() {
   const text = inputMessage.value.trim()
@@ -371,7 +505,8 @@ function sendMessage() {
   setTimeout(() => {
     messages.value.push({
       role: 'ai',
-      content: `这是关于您提问的回复。相关时间点 <span class="timestamp-badge">⏱ 08:45</span> 处有详细讲解。`,
+      // 模拟回复也走 markdown 渲染
+      content: renderMarkdown(`这是关于您提问的回复。相关时间点 **08:45** 处有详细讲解。\n\n\`\`\`python\nprint("hello")\n\`\`\``),
     })
     scrollToBottom()
   }, 800)
@@ -399,6 +534,7 @@ function autoResize() {
   })
 }
 </script>
+
 
 <style scoped>
 * {
@@ -825,9 +961,9 @@ function autoResize() {
 }
 
 .message.user .message-content {
-  background: var(--primary);
-  color: white;
-  border-color: var(--primary);
+  background: #ffffff;
+  color: #1f2937;
+  border-color:1px solid #e5e7eb;
 }
 
 :deep(.timestamp-badge) {

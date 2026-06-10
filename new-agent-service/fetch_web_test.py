@@ -25,8 +25,10 @@ def extract_bvid(url: str) -> str:
 
 def get_video_info(bvid: str, part: int = 1):
     url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-    resp = requests.get(url, headers=HEADERS, timeout=10)
+    print(f"[DEBUG] 请求视频信息: bvid={bvid}, part={part}, url={url}")
+    resp = requests.get(url, headers=HEADERS, timeout=15)
     data = resp.json()
+    print(f"[DEBUG] 视频信息返回: code={data.get('code')}, title={data.get('data',{}).get('title','N/A')}")
     if data.get("code") != 0:
         raise RuntimeError(f"获取视频信息失败: {data.get('message')}")
 
@@ -36,10 +38,13 @@ def get_video_info(bvid: str, part: int = 1):
 
     # 分P处理：B站 pages 数组里 page 字段就是 P 数
     pages = d.get("pages", [])
+    print(f"[DEBUG] 视频分P信息: pages数量={len(pages)}, 请求part={part}")
     if pages:
         target = next((p for p in pages if p.get("page") == part), pages[0])
         cid = target["cid"]
         part_name = target.get("part", "")
+        actual_page = target.get("page", 1)
+        print(f"[DEBUG] 选中分P: page={actual_page}, cid={cid}, part_name={part_name}")
         if part_name and len(pages) > 1:
             title = f"{title} P{part} {part_name}"
     else:
@@ -54,7 +59,8 @@ def get_subtitles(
 ):
     """获取字幕元数据列表（带aid参数，空URL时自动重试）"""
     url = f"https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}&aid={aid}"
-    resp = requests.get(url, headers=HEADERS, cookies=cookies, timeout=10)
+    print(f"[DEBUG] 请求字幕: bvid={bvid}, cid={cid}, aid={aid}")
+    resp = requests.get(url, headers=HEADERS, cookies=cookies, timeout=15)
     data = resp.json()
 
     print(f"[调试] B站API返回: {data}")
@@ -68,6 +74,7 @@ def get_subtitles(
     # 检查是否有空URL的字幕，有则重试一次（B站接口延迟问题）
     has_empty = any(not s.get("subtitle_url") for s in subs)
     if has_empty and retry:
+        print(f"[DEBUG] 发现空URL字幕，2秒后重试...")
         time.sleep(2)
         return get_subtitles(bvid, cid, aid, cookies, retry=False)
 
@@ -84,9 +91,12 @@ def fetch_subtitle_body(sub_url: str) -> List[Dict[str, Any]]:
     elif not sub_url.startswith("http"):
         raise ValueError(f"非法的字幕URL: {sub_url!r}")
 
-    resp = requests.get(sub_url, headers=HEADERS, timeout=10)
+    print(f"[DEBUG] 拉取字幕内容: {sub_url[:80]}...")
+    resp = requests.get(sub_url, headers=HEADERS, timeout=15)
     sub_data = resp.json()
-    return sub_data.get("body", [])
+    body = sub_data.get("body", [])
+    print(f"[DEBUG] 字幕内容条数: {len(body)}")
+    return body
 
 
 def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
@@ -152,10 +162,14 @@ def parse_video(req: ParseRequest):
     POST http://localhost:8001/parse
     Body: {"url": "https://www.bilibili.com/video/BV1DAL56hEPe/?p=2", "cookie": "SESSDATA=xxx"}
     """
-    print("Action!!!")
+    print(f"\n{'='*60}")
+    print(f"[DEBUG] /parse 收到请求: url={req.url}, part={req.part}")
+    print(f"[DEBUG] cookie长度: {len(req.cookie) if req.cookie else 0}")
     try:
         bvid = extract_bvid(req.url)
+        print(f"[DEBUG] 提取到BV号: {bvid}")
         aid, cid, title = get_video_info(bvid, req.part)
+        print(f"[DEBUG] 视频信息: aid={aid}, cid={cid}, title={title}")
 
         # 把前端/Java传来的 cookie 字符串转成 dict
         cookies = parse_cookie_string(req.cookie)
@@ -190,6 +204,7 @@ def parse_video(req: ParseRequest):
             print(f"[警告] 文件保存失败（不影响接口返回）: {e}")
         # ==========================================
 
+        print(f"[DEBUG] /parse 返回: title={title}, bvid={bvid}, subtitles条数={len(results)}")
         return {
             "code": 200,
             "title": title,

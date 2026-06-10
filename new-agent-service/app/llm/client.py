@@ -16,7 +16,7 @@ class LLMClient:
 @dataclass
 class AnthropicLLMClient(LLMClient):
     config: LLMConfig
-    max_tokens: int = 800
+    max_tokens: int = 80000
 
     @classmethod
     def from_env(cls) -> "AnthropicLLMClient":
@@ -29,7 +29,7 @@ class AnthropicLLMClient(LLMClient):
                 "ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in .env."
             )
 
-        url = self.config.base_url.rstrip("/") + "/v1/messages"
+        url = self.config.base_url.rstrip("/") + "/v1/chat/completions"
         payload = {
             "model": self.config.model,
             "max_tokens": self.max_tokens,
@@ -65,13 +65,12 @@ class AnthropicLLMClient(LLMClient):
         return self._extract_text(data)
 
     def _extract_text(self, data: dict) -> str:
-        content = data.get("content", [])
-        texts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                texts.append(item.get("text", ""))
-
-        if texts:
-            return "\n".join(texts).strip()
-
+        # OpenAI/DeepSeek 格式：choices[0].message.content
+        choices = data.get("choices", [])
+        if choices and isinstance(choices, list):
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+            if content:
+                return content.strip()
+        # 兜底：如果 content 为空（比如思考模型占满 token），返回原始 JSON 调试
         return json.dumps(data, ensure_ascii=False)

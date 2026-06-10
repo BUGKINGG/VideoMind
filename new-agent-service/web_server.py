@@ -53,6 +53,9 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
             if path == "/api/summary":
                 self._handle_summary(body)
                 return
+            if path == "/api/process":
+                self._handle_process(body)
+                return
             self._send_json({"error": "API route not found"}, status=HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError) as error:
             self._send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
@@ -80,11 +83,48 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         owner_user_id = body.get("user_id") or "__shared__"
         self._send_json(agent.summarize_video(video_id, owner_user_id=owner_user_id))
 
+    def _handle_process(self, body: dict) -> None:
+        """
+        一体化接口：接收字幕文本 → 存储 → 切块 → 索引 → 总结 → 返回结果
+        供 Java 后端调用
+        """
+        print(f"[DEBUG] /api/process body keys: {list(body.keys())}")
+        video_id = self._required(body, "video_id")
+        title = self._required(body, "title")
+        transcript_text = self._required(body, "transcript_text")
+        user_id = body.get("user_id") or "__shared__"
+
+        print(f"[DEBUG] /api/process: video_id={video_id}, title={title[:30] if title else 'EMPTY'}, user_id={user_id}, text_len={len(transcript_text)}")
+
+        # 1. 存储字幕
+        agent.add_video_transcript(
+            video_id=video_id,
+            title=title,
+            transcript_text=transcript_text,
+            owner_user_id=user_id,
+        )
+
+        # 2. 切块并索引
+        agent.build_video_chunks(video_id=video_id, owner_user_id=user_id)
+
+        # 3. 生成总结
+        result = agent.summarize_video(video_id=video_id, owner_user_id=user_id)
+
+        self._send_json({
+            "code": 200,
+            "video_id": result["video_id"],
+            "title": result["title"],
+            "summary": result["summary"],
+        })
+
     def _read_json(self) -> dict:
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
+            print(f"[WARN] Content-Length is 0 or missing, headers={dict(self.headers)}")
             return {}
-        return json.loads(self.rfile.read(content_length).decode("utf-8"))
+        raw = self.rfile.read(content_length).decode("utf-8")
+        print(f"[DEBUG] Received body: {raw[:500]}")
+        return json.loads(raw)
 
     def _required(self, body: dict, key: str) -> str:
         value = str(body.get(key, "")).strip()

@@ -14,4 +14,6 @@ public class SummaryResult {
     private Integer status;
 
     private Integer subtitleCount;
+
+    private String sessionId;
 }
