@@ -9,6 +9,16 @@ import java.util.Map;
 public class ChatResult {
 
     /**
+     * 会话ID（流式推送凭证）
+     */
+    private String sessionId;
+
+    /**
+     * 0-处理中 1-完成 2-失败
+     */
+    private Integer status;
+
+    /**
      * AI回复内容
      */
     private String answer;

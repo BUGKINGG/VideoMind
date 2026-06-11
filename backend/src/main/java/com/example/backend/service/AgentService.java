@@ -20,4 +20,8 @@ public interface AgentService extends IService<Video> {
      * @return AI回复结果
      */
     ChatResult chat(ChatDTO chatDTO);
+
+    ChatResult submitChat(ChatDTO chatDTO);
+
+    SseEmitter connectChatSse(String sid);
 }

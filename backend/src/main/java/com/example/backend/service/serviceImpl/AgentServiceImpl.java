@@ -558,4 +558,141 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         return result;
     }
+
+    private final Map<String, Long> sidToConversationId = new ConcurrentHashMap<>();
+
+    @Transactional
+    public ChatResult submitChat(ChatDTO chatDTO) {
+        Long userId = BaseContext.getCurrentId();
+        Long conversationId = chatDTO.getConversationId();
+        String message = chatDTO.getMessage();
+
+        // 保存用户消息
+        Message userMsg = new Message();
+        userMsg.setConversationId(conversationId);
+        userMsg.setRole("user");
+        userMsg.setContent(message);
+        userMsg.setCreatedAt(LocalDateTime.now());
+        messageMapper.insert(userMsg);
+
+        String sid = UUID.randomUUID().toString();
+        sidToConversationId.put(sid, conversationId);
+
+        CompletableFuture.runAsync(() -> doChatProcess(sid, conversationId, userId, message));
+
+        ChatResult res = new ChatResult();
+        res.setSessionId(sid);
+        res.setStatus(0);
+        return res;
+    }
+
+    public SseEmitter connectChatSse(String sid) {
+        SseEmitter emitter = new SseEmitter(120_000L);
+        emitters.put(sid, emitter);
+        emitter.onCompletion(() -> cleanChatSid(sid));
+        emitter.onTimeout(() -> cleanChatSid(sid));
+        emitter.onError((e) -> cleanChatSid(sid));
+        try {
+            emitter.send(SseEmitter.event().name("connect").data("{\"status\":0,\"msg\":\"connected\"}"));
+        } catch (Exception e) {
+            cleanChatSid(sid);
+        }
+        return emitter;
+    }
+
+    private void cleanChatSid(String sid) {
+        emitters.remove(sid);
+        sidToConversationId.remove(sid);
+    }
+
+    private void doChatProcess(String sid, Long conversationId, Long userId, String message) {
+        try {
+            Conversation conversation = conversationMapper.selectById(conversationId);
+            Long videoId = conversation.getVideoId();
+            Video video = videoMapper.selectById(videoId);
+
+            String agentVideoId = videoIdToAgentVideoId.get(videoId);
+            if (agentVideoId == null) {
+                String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
+                agentVideoId = bvid + "_p" + video.getPart();
+            }
+
+            // 调用 Python /api/chat（同步）
+            Map<String, Object> chatReq = new HashMap<>();
+            chatReq.put("user_id", String.valueOf(userId));
+            chatReq.put("session_id", conversationId.toString());
+            chatReq.put("video_id", agentVideoId);
+            chatReq.put("question", message);
+
+            ObjectMapper mapper = new ObjectMapper();
+            byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
+            URL agentUrl = new URL(agentServiceUrl + "/api/chat");
+            HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+            conn.setDoOutput(true);
+            conn.setDoInput(true);
+            conn.setFixedLengthStreamingMode(bodyBytes.length);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+            try (OutputStream os = conn.getOutputStream()) { os.write(bodyBytes); os.flush(); }
+
+            Map agentResult = mapper.readValue(
+                (conn.getResponseCode() < 400 ? conn.getInputStream() : conn.getErrorStream()),
+                Map.class
+            );
+            conn.disconnect();
+
+            if (agentResult.containsKey("error")) {
+                throw new RuntimeException("Agent错误: " + agentResult.get("error"));
+            }
+            String answer = (String) agentResult.get("answer");
+            if (answer == null) answer = "抱歉，AI暂时无法回答您的问题。";
+
+            // 保存 AI 回复
+            Message aiMsg = new Message();
+            aiMsg.setConversationId(conversationId);
+            aiMsg.setRole("ai");
+            aiMsg.setContent(answer);
+            aiMsg.setCreatedAt(LocalDateTime.now());
+            messageMapper.insert(aiMsg);
+
+            // 更新会话时间
+            Conversation upd = new Conversation();
+            upd.setId(conversationId);
+            upd.setUpdatedAt(LocalDateTime.now());
+            conversationMapper.updateById(upd);
+
+            // 伪流式推送（复用 pushChunk）
+            int step = 20;
+            for (int i = 0; i < answer.length(); i += step) {
+                int end = Math.min(i + step, answer.length());
+                String chunk = answer.substring(0, end);
+                pushChunk(sid, chunk);
+                try { Thread.sleep(40); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+            }
+
+            // 推送 done
+            pushChatDone(sid, conversationId, answer);
+
+        } catch (Exception e) {
+            log.error("Chat处理失败", e);
+            pushError(sid, e.getMessage());
+        }
+    }
+
+    private void pushChatDone(String sid, Long conversationId, String answer) {
+        SseEmitter emitter = emitters.get(sid);
+        if (emitter == null) return;
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", "done");
+            payload.put("conversationId", conversationId);
+            payload.put("answer", answer);
+            emitter.send(SseEmitter.event().name("message").data(new ObjectMapper().writeValueAsString(payload)));
+            emitter.complete();
+        } catch (Exception e) {
+            cleanChatSid(sid);
+        }
+    }
 }

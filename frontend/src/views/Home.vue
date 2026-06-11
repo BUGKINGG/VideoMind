@@ -608,52 +608,92 @@ async function sendMessage() {
   const text = inputMessage.value.trim()
   if (!text) return
 
-  if (!currentConversationId.value) {
-    alert('请先提交视频并等待总结完成后再进行对话')
-    return
-  }
-
-  // 1. 添加用户消息到UI
+  // 1. 用户消息
   messages.value.push({ role: 'user', content: text })
   inputMessage.value = ''
   autoResize()
   nextTick(() => scrollToBottom())
 
-  // 2. 调用后端对话API
+  // 2. AI 占位，记录固定索引
+  const aiIndex = messages.value.length
+  messages.value.push({ role: 'ai', content: '思考中...', isStreaming: true })
+  nextTick(() => scrollToBottom())
+
   try {
     const res = await request.post('/agent/chat', {
       conversationId: currentConversationId.value,
       message: text
     })
+    const { sessionId } = res.data
 
-    if (res.code !== 200) {
-      messages.value.push({
-        role: 'ai',
-        content: '对话请求失败: ' + (res.message || '未知错误')
-      })
-      scrollToBottom()
-      return
+    const response = await fetch(`/agent/chat/stream?sid=${sessionId}`, {
+      headers: { 'token': userStore.token }
+    })
+    if (!response.ok) throw new Error(`SSE ${response.status}`)
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        const remaining = buffer.split('\n\n')
+        for (const chunk of remaining) processChatChunk(chunk, aiIndex)
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const chunks = buffer.split('\n\n')
+      buffer = chunks.pop() || ''
+      for (const chunk of chunks) processChatChunk(chunk, aiIndex)
     }
-
-    // 3. 添加AI回复到UI（渲染markdown）
-    messages.value.push({
-      role: 'ai',
-      content: renderMarkdown(res.data.answer || '')
-    })
-    scrollToBottom()
-
-    // 4. 刷新历史记录列表（更新最新对话时间）
-    loadHistory()
-
   } catch (error) {
-    console.error('对话请求失败:', error)
-    messages.value.push({
-      role: 'ai',
-      content: '抱歉，请求AI服务时出错，请稍后重试。'
-    })
-    scrollToBottom()
+    console.error('发送失败:', error)
+    messages.value.splice(aiIndex, 1, { role: 'ai', content: '发送失败，请重试' })
   }
 }
+
+function processChatChunk(chunk, aiIndex) {
+  if (!chunk.trim()) return
+  try {
+    const lines = chunk.split('\n')
+    let eventName = 'message', dataStr = ''
+    for (const line of lines) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim()
+      else if (line.startsWith('data:')) dataStr = line.slice(5).trim()
+    }
+    if (!dataStr) return
+    const data = JSON.parse(dataStr)
+    console.log('[Chat SSE]', eventName, data)  // 调试用，确认收到数据
+
+    if (eventName === 'message' && data.type === 'chunk') {
+      // 用 splice 强制触发 Vue 响应式
+      messages.value.splice(aiIndex, 1, {
+        role: 'ai',
+        content: renderMarkdown(data.content || ''),
+        isStreaming: true
+      })
+      nextTick(() => scrollToBottom())
+    }
+    else if (eventName === 'message' && data.type === 'done') {
+      messages.value.splice(aiIndex, 1, {
+        role: 'ai',
+        content: renderMarkdown(data.answer || data.content || '')
+      })
+      loadHistory()
+    }
+    else if (eventName === 'error') {
+      messages.value.splice(aiIndex, 1, {
+        role: 'ai',
+        content: '出错: ' + (data.message || '未知错误')
+      })
+    }
+  } catch (e) {
+    console.error('解析 chat chunk 失败:', e, chunk)
+  }
+}
+
+
 
 function scrollToBottom() {
   nextTick(() => {

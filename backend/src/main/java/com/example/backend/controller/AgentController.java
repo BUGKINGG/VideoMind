@@ -32,21 +32,33 @@ public class AgentController {
     }
 
     /**
-     * SSE 长连接接口
-     * 前端使用 fetch + ReadableStream 连接，通过 Headers 携带 token
-     * 因此可以正常通过 Spring 的 token 拦截器验证
-     * produces 指定返回 text/event-stream 格式，浏览器识别为 SSE 流
+     * SSE 长连接接口（总结）
      */
     @GetMapping(value = "/summary/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestParam String sid) {
         return agentService.connectSse(sid);
     }
 
+    /**
+     * 提交视频对话任务（两步式流式）
+     * 1. 前端 POST 提交，后端保存用户消息，启动异步处理，返回 sessionId
+     * 2. 前端 GET /chat/stream 建立 SSE 连接，接收 AI 流式回复
+     */
     @PostMapping("/chat")
-    @Operation(summary = "视频对话问答")
+    @Operation(summary = "提交视频对话")
     public Result<ChatResult> chat(@RequestBody ChatDTO chatDTO) {
-        log.info("收到对话请求: conversationId={}, message={}", chatDTO.getConversationId(), chatDTO.getMessage());
-        ChatResult result = agentService.chat(chatDTO);
+        log.info("提交对话: conversationId={}, message={}", chatDTO.getConversationId(), chatDTO.getMessage());
+        ChatResult result = agentService.submitChat(chatDTO);
         return Result.success(result);
+    }
+
+    /**
+     * 视频对话 SSE 流式推送
+     * 前端通过 fetch + ReadableStream 连接，携带 token 通过 Spring 拦截器
+     */
+    @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "视频对话流式推送")
+    public SseEmitter chatStream(@RequestParam String sid) {
+        return agentService.connectChatSse(sid);
     }
 }

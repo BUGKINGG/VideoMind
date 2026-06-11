@@ -16,7 +16,7 @@ public class MessageVO {
     private Long videoId;
     private String url;
     private Integer part;
-    private Long subtitleCount;
+    private Integer subtitleCount;
     private List<Message> messages;
 
 }
