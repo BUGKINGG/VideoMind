@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
 import com.example.backend.common.BilibiliUrlUtils;
+import com.example.backend.common.RedisLockUtil;
 import com.example.backend.dto.ChatDTO;
 import com.example.backend.dto.SummaryDTO;
 import com.example.backend.entity.Conversation;
@@ -21,6 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,6 +33,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -61,17 +64,27 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // 用于存储前端建立的 SSE 长连接，处理完成后通过该连接推送结果
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
-    // key: sessionId, value: videoId
-    // 用于建立 sessionId 与视频记录的映射，推送时知道更新哪条记录
-    private final Map<String, Long> sidToVideoId = new ConcurrentHashMap<>();
-
-    // key: videoId, value: agentVideoId (如 BV1xx_p1)
-    // 用于对话时定位 Python Agent 中的视频记录
-    private final Map<Long, String> videoIdToAgentVideoId = new ConcurrentHashMap<>();
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     @Autowired
     private MessageMapper messageMapper;
+    @Autowired
+    private RedisLockUtil redisLockUtil;
 
+    // ========== 已经迁移到 Redis 的 ==========
+    // key: videomind:sse:summary:{sid}  value: videoId
+    // key: videomind:sse:chat:{sid}     value: conversationId
+    // key: videomind:video:agent_id:{videoId}  value: agentVideoId
+
+    private static final String REDIS_SSE_SUMMARY_PREFIX = "videomind:sse:summary:";
+    private static final String REDIS_SSE_CHAT_PREFIX = "videomind:sse:chat:";
+    private static final String REDIS_VIDEO_AGENT_PREFIX = "videomind:video:agent_id:";
+    private static final long REDIS_SSE_TTL_MINUTES = 10;
+    private static final String REDIS_LOCK_VIDEO_PREFIX = "videomind:lock:video:";
+    private static final long LOCK_WAIT_RETRY_MS = 500;
+    private static final int LOCK_MAX_RETRY = 6;
+    private static final String REDIS_USER_LIMIT = "videomind:limit:";
     /**
      * 提交总结任务（同步入口）
      * 1. 检查数据库缓存（已完成的直接返回）
@@ -89,6 +102,13 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         String cookie = summaryDTO.getCookie();
         Integer part = BilibiliUrlUtils.extractPart(rawUrl);
         Long userId = BaseContext.getCurrentId();
+
+        // 用redis对用户进行限流，限制每10秒只能进行一次总结，放置脚本刷爆token
+        String limitKey = REDIS_USER_LIMIT + userId.toString();
+        Boolean allowed = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
+        if(!allowed) {
+            throw new RuntimeException("操作太频繁，请稍后再试")
+        }
 
         log.info("[Summary] 请求解析: rawUrl={}, baseUrl={}, part={}, userId={}", rawUrl, baseUrl, part, userId);
 
@@ -130,30 +150,147 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         log.info("[Summary] 未命中缓存，创建新记录: baseUrl={}, part={}", baseUrl, part);
 
-        // 如果没有，则创建记录，标记为"处理中"
-        Video video = new Video();
-        video.setCreateAt(LocalDateTime.now());
-        video.setPart(part);
-        video.setUrl(baseUrl);
-        video.setUserId(userId);
-        video.setStatus(0);
-        this.save(video);
-        Long videoId = video.getId();
+        // 构造分布式锁
+        String lockKey = REDIS_LOCK_VIDEO_PREFIX + baseUrl + ":" + part;
+        String lockValue = redisLockUtil.tryLock(lockKey, Duration.ofSeconds(30));
 
-        // 生成 sessionId，绑定 videoId 关系
-        // 使用 UUID 确保全局唯一，作为 SSE 连接的凭证
+       if (lockValue != null) {
+            // ===== 获取锁成功 =====
+            try {
+                // 3. 双重检查：拿到锁后再查一次（等锁期间可能别人已经创建好了）
+                exist = videoMapper.selectOne(
+                    Wrappers.<Video>lambdaQuery()
+                        .eq(Video::getUrl, baseUrl)
+                        .eq(Video::getPart, part)
+                        .eq(Video::getStatus, 1)
+                );
+                if (exist != null) {
+                    log.info("[Summary] 双重检查命中缓存: videoId={}", exist.getId());
+                    return buildCacheResult(exist, userId);
+                }
+
+                // 4. 确认没有正在处理中的记录（防止死锁残留或异常）
+                Video processing = videoMapper.selectOne(
+                    Wrappers.<Video>lambdaQuery()
+                        .eq(Video::getUrl, baseUrl)
+                        .eq(Video::getPart, part)
+                        .eq(Video::getStatus, 0)
+                );
+                if (processing != null) {
+                    // 别人正在处理，直接共享等待（不重复创建）
+                    log.info("[Summary] 发现已有任务在处理中，共享等待: videoId={}",
+                        processing.getId());
+                    return buildProcessingResult(processing, userId);
+                }
+
+                // 5. 真正创建新记录，启动任务
+                log.info("[Summary] 未命中缓存，创建新记录: baseUrl={}, part={}",
+                    baseUrl, part);
+                Video video = new Video();
+                video.setCreateAt(LocalDateTime.now());
+                video.setPart(part);
+                video.setUrl(baseUrl);
+                video.setUserId(userId);
+                video.setStatus(0);
+                this.save(video);
+                Long videoId = video.getId();
+
+                String sid = UUID.randomUUID().toString();
+                String redisKey = REDIS_SSE_SUMMARY_PREFIX + sid;
+                redisTemplate.opsForValue().set(redisKey, videoId.toString(),
+                    Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
+
+                CompletableFuture.runAsync(() ->
+                    doProcess(videoId, baseUrl, part, userId, cookie, sid));
+
+                SummaryResult res = new SummaryResult();
+                res.setVideoId(videoId);
+                res.setSessionId(sid);
+                res.setStatus(0);
+                return res;
+
+            } finally {
+                // 6. 释放锁（30秒内任务肯定已经启动，锁可以释放）
+                // 实际处理由 CompletableFuture 在后台继续，不依赖锁
+                redisLockUtil.unlock(lockKey, lockValue);
+            }
+        }
+
+        // ========== 7. 获取锁失败：别人正在创建/处理，轮询等待 ==========
+        log.info("[Summary] 获取锁失败，进入轮询等待: baseUrl={}, part={}", baseUrl, part);
+
+        for (int i = 0; i < LOCK_MAX_RETRY; i++) {
+            try {
+                Thread.sleep(LOCK_WAIT_RETRY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("等待中断");
+            }
+
+            // 再次查缓存
+            exist = videoMapper.selectOne(
+                Wrappers.<Video>lambdaQuery()
+                    .eq(Video::getUrl, baseUrl)
+                    .eq(Video::getPart, part)
+                    .eq(Video::getStatus, 1)
+            );
+            if (exist != null) {
+                log.info("[Summary] 轮询命中缓存: videoId={}", exist.getId());
+                return buildCacheResult(exist, userId);
+            }
+
+            // 查是否已有处理中的记录
+            Video processing = videoMapper.selectOne(
+                Wrappers.<Video>lambdaQuery()
+                    .eq(Video::getUrl, baseUrl)
+                    .eq(Video::getPart, part)
+                    .eq(Video::getStatus, 0)
+            );
+            if (processing != null) {
+                log.info("[Summary] 轮询发现处理中，共享等待: videoId={}",
+                    processing.getId());
+                return buildProcessingResult(processing, userId);
+            }
+        }
+
+        // 8. 轮询结束仍未命中，返回错误让前端重试
+        log.error("[Summary] 轮询超时仍未获取结果: baseUrl={}, part={}", baseUrl, part);
+        throw new RuntimeException("系统繁忙，请稍后重试");
+    }
+
+    private SummaryResult buildCacheResult(Video video, Long userId) {
+        Conversation existConv = conversationMapper.selectOne(
+            Wrappers.<Conversation>lambdaQuery()
+                .eq(Conversation::getVideoId, video.getId())
+                .eq(Conversation::getUserId, userId)
+                .eq(Conversation::getStatus, 1)
+                .orderByDesc(Conversation::getCreatedAt)
+                .last("LIMIT 1")
+        );
+        SummaryResult cache = new SummaryResult();
+        cache.setVideoId(video.getId());
+        cache.setSessionId("");
+        cache.setStatus(1);
+        cache.setTitle(video.getTitle());
+        cache.setSummary(video.getSummary());
+        cache.setSubtitleCount(video.getSubtitleCount());
+        if (existConv != null) {
+            cache.setConversationId(existConv.getId());
+        }
+        return cache;
+    }
+
+    private SummaryResult buildProcessingResult(Video processing, Long userId) {
+        // 生成新的 sid，绑定到同一个 videoId
+        // 前端用这个 sid 连 SSE，等后台任务完成后统一推送
         String sid = UUID.randomUUID().toString();
-        sidToVideoId.put(sid, videoId);
+        String redisKey = REDIS_SSE_SUMMARY_PREFIX + sid;
+        redisTemplate.opsForValue().set(redisKey, processing.getId().toString(),
+            Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
-        // 启动后台线程处理耗时逻辑（B站解析 + 大模型总结）
-        // 使用 CompletableFuture.runAsync 避免阻塞 Tomcat 线程，提升并发能力
-        CompletableFuture.runAsync(() -> doProcess(videoId, baseUrl, part, userId, cookie, sid));
-
-        // 立即返回前端：正在处理，请通过 sessionId 建立 SSE 连接监听结果
         SummaryResult res = new SummaryResult();
-        res.setVideoId(videoId);
+        res.setVideoId(processing.getId());
         res.setSessionId(sid);
-        // 处理中
         res.setStatus(0);
         return res;
     }
@@ -170,7 +307,59 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     @Override
     public SseEmitter connectSse(String sid) {
-        // 5 分钟超时：足够大模型推理 + 网络波动，单位毫秒
+        String redisKey = REDIS_SSE_SUMMARY_PREFIX + sid;
+        String videoIdStr = redisTemplate.opsForValue().get(redisKey);
+
+        // redisKey过期或者无效，则直接返回错误
+        if(videoIdStr == null){
+            SseEmitter deadEmitter = new SseEmitter(0L);
+            try{
+                deadEmitter.send(SseEmitter.event()
+                    .name("error")
+                    .data("{\"type\":\"error\",\"message\":\"会话已过期或不存在\"}")
+                );
+                deadEmitter.complete();
+            } catch (Exception e) {
+                log.error("发送过期通知失败：", e);
+            }
+            return deadEmitter;
+        }
+
+        Long videoId = Long.valueOf(videoIdStr);
+
+        // 如果视频已经出理完了，直接返回结果
+        Video video = videoMapper.selectById(videoId);
+        if(video != null && video.getStatus() == 1){
+            SseEmitter emitter = new SseEmitter(30_000L);
+            try {
+                Conversation existConv = conversationMapper.selectOne(
+                    Wrappers.<Conversation>lambdaQuery()
+                        .eq(Conversation::getVideoId, videoId)
+                        .eq(Conversation::getUserId, video.getUserId())
+                        .eq(Conversation::getStatus, 1)
+                        .orderByDesc(Conversation::getCreatedAt)
+                        .last("LIMIT 1")
+                );
+
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "done");
+                payload.put("videoId", videoId);
+                payload.put("conversationId", existConv != null ? existConv.getId() : null);
+                payload.put("title", video.getTitle());
+                payload.put("summary", video.getSummary());
+                payload.put("subtitleCount", video.getSubtitleCount());
+
+                emitter.send(SseEmitter.event()
+                    .name("message")
+                    .data(new ObjectMapper().writeValueAsString(payload)));
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("补发已完成事件失败", e);
+            }
+            return emitter;
+        }
+
+        // 视频还在处理中，建立SSE长连接
         SseEmitter emitter = new SseEmitter(300_000L);
         emitters.put(sid, emitter);
 
@@ -197,7 +386,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     private void cleanSid(String sid) {
         emitters.remove(sid);
-        sidToVideoId.remove(sid);
     }
 
     /**
@@ -286,7 +474,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             // 调用 Agent 服务进行字幕处理和总结
             // video_id 使用 bvid + "_p" + part 格式，确保唯一性
             String agentVideoId = (bvid != null ? bvid : "video") + "_p" + part;
-            videoIdToAgentVideoId.put(videoId, agentVideoId);
+            String agentIdKey = REDIS_VIDEO_AGENT_PREFIX + videoId;
+            redisTemplate.opsForValue().set(agentIdKey, agentVideoId);
             String transcriptText = fullText.toString();
             System.out.println("[Agent] 调用process: video_id=" + agentVideoId
                 + ", title长度=" + (title != null ? title.length() : 0)
@@ -484,7 +673,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         // 2. 构造agentVideoId
-        String agentVideoId = videoIdToAgentVideoId.get(videoId);
+        String agentVideoId = redisTemplate.opsForValue().get(REDIS_SSE_CHAT_PREFIX + videoId.toString());
         if (agentVideoId == null) {
             // fallback: 从url提取bvid
             String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
@@ -572,8 +761,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         return result;
     }
 
-    private final Map<String, Long> sidToConversationId = new ConcurrentHashMap<>();
-
     @Transactional
     public ChatResult submitChat(ChatDTO chatDTO) {
         Long userId = BaseContext.getCurrentId();
@@ -589,7 +776,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         messageMapper.insert(userMsg);
 
         String sid = UUID.randomUUID().toString();
-        sidToConversationId.put(sid, conversationId);
+        String redisKey = REDIS_SSE_CHAT_PREFIX + sid;
+        redisTemplate.opsForValue().set(redisKey, conversationId.toString(), Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
         CompletableFuture.runAsync(() -> doChatProcess(sid, conversationId, userId, message));
 
@@ -599,23 +787,75 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         return res;
     }
 
-    public SseEmitter connectChatSse(String sid) {
-        SseEmitter emitter = new SseEmitter(120_000L);
-        emitters.put(sid, emitter);
-        emitter.onCompletion(() -> cleanChatSid(sid));
-        emitter.onTimeout(() -> cleanChatSid(sid));
-        emitter.onError((e) -> cleanChatSid(sid));
+   public SseEmitter connectChatSse(String sid) {
+    // 1. 从 Redis 验证 sid 是否存在
+    String redisKey = REDIS_SSE_CHAT_PREFIX + sid;
+    String convIdStr = redisTemplate.opsForValue().get(redisKey);
+
+    if (convIdStr == null) {
+        // sid 不存在或已过期，直接返回错误并关闭
+        SseEmitter deadEmitter = new SseEmitter(0L);
         try {
-            emitter.send(SseEmitter.event().name("connect").data("{\"status\":0,\"msg\":\"connected\"}"));
+            deadEmitter.send(SseEmitter.event()
+                .name("error")
+                .data("{\"type\":\"error\",\"message\":\"会话已过期或不存在\"}"));
+            deadEmitter.complete();
         } catch (Exception e) {
-            cleanChatSid(sid);
+            log.error("发送对话过期通知失败", e);
+        }
+        return deadEmitter;
+    }
+
+    Long conversationId = Long.valueOf(convIdStr);
+
+    // 2. 双重检查：后台线程 doChatProcess 可能已经跑完了
+    // 查 message 表，看是否已有 AI 回复
+    Message latestAiMsg = messageMapper.selectOne(
+        Wrappers.<Message>lambdaQuery()
+            .eq(Message::getConversationId, conversationId)
+            .eq(Message::getRole, "ai")
+            .orderByDesc(Message::getCreatedAt)
+            .last("LIMIT 1")
+    );
+
+    if (latestAiMsg != null) {
+        // 已经处理完成，直接补发 done 事件，不挂起等待
+        SseEmitter emitter = new SseEmitter(30_000L);
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", "done");
+            payload.put("conversationId", conversationId);
+            payload.put("answer", latestAiMsg.getContent());
+            emitter.send(SseEmitter.event()
+                .name("message")
+                .data(new ObjectMapper().writeValueAsString(payload)));
+            emitter.complete();
+        } catch (Exception e) {
+            log.error("补发对话完成事件失败, sid={}, conversationId={}", sid, conversationId, e);
         }
         return emitter;
     }
 
+    // 3. 还在处理中，建立 SSE 长连接等待 doChatProcess 推送
+    SseEmitter emitter = new SseEmitter(120_000L);
+    emitters.put(sid, emitter);
+
+    emitter.onCompletion(() -> cleanChatSid(sid));
+    emitter.onTimeout(() -> cleanChatSid(sid));
+    emitter.onError((e) -> cleanChatSid(sid));
+
+    try {
+        emitter.send(SseEmitter.event()
+            .name("connect")
+            .data("{\"status\":0,\"msg\":\"connected\"}"));
+    } catch (Exception e) {
+        cleanChatSid(sid);
+    }
+    return emitter;
+}
+
     private void cleanChatSid(String sid) {
         emitters.remove(sid);
-        sidToConversationId.remove(sid);
     }
 
     private void doChatProcess(String sid, Long conversationId, Long userId, String message) {
@@ -624,7 +864,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             Long videoId = conversation.getVideoId();
             Video video = videoMapper.selectById(videoId);
 
-            String agentVideoId = videoIdToAgentVideoId.get(videoId);
+            String agentVideoId = redisTemplate.opsForValue().get(REDIS_VIDEO_AGENT_PREFIX + videoId.toString());
             if (agentVideoId == null) {
                 String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
                 agentVideoId = bvid + "_p" + video.getPart();
