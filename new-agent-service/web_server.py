@@ -93,19 +93,27 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         title = self._required(body, "title")
         transcript_text = self._required(body, "transcript_text")
         user_id = body.get("user_id") or "__shared__"
+        segments = body.get("segments")
 
         print(f"[DEBUG] /api/process: video_id={video_id}, title={title[:30] if title else 'EMPTY'}, user_id={user_id}, text_len={len(transcript_text)}")
 
-        # 1. 存储字幕
-        agent.add_video_transcript(
-            video_id=video_id,
-            title=title,
-            transcript_text=transcript_text,
-            owner_user_id=user_id,
-        )
-
-        # 2. 切块并索引
-        agent.build_video_chunks(video_id=video_id, owner_user_id=user_id)
+        # 1. 存储字幕（优先用结构化 segments，否则 fallback 纯文本）
+        if segments is not None and len(segments) > 0:
+            print(f"[DEBUG] 使用 segments 路径，共 {len(segments)} 条")
+            agent.add_video_transcript_with_segments(
+                video_id=video_id,
+                title=title,
+                segments=segments,
+                owner_user_id=user_id,
+            )
+        else:
+            print(f"[DEBUG] 使用纯文本路径")
+            agent.add_video_transcript(
+                video_id=video_id,
+                title=title,
+                transcript_text=transcript_text,
+                owner_user_id=user_id,
+            )
 
         # 3. 生成总结
         result = agent.summarize_video(video_id=video_id, owner_user_id=user_id)

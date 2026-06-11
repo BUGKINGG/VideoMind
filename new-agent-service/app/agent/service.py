@@ -4,7 +4,7 @@ from pathlib import Path
 from app.agent.graph import AgentGraphRunner
 from app.llm.client import AnthropicLLMClient, LLMClient
 from app.llm.embedding import EmbeddingClient, get_default_embedding_client
-from app.models import ChatTurn, TranscriptChunk
+from app.models import ChatTurn, TranscriptChunk, VideoTranscript, TranscriptSegment
 from app.repositories.conversation_repository import SQLiteConversationRepository
 from app.repositories.vector_store import DEFAULT_OWNER_USER_ID, SQLiteVectorStore
 from app.repositories.video_repository import SQLiteVideoRepository
@@ -268,39 +268,31 @@ class SimpleAgentService:
 
     # 加载到内存中
     def _ensure_video_loaded(self, video_id: str, owner_user_id: str) -> str:
-        if self.transcript_store.has_video(video_id, owner_user_id=owner_user_id):
+        # 1. 先检查内存缓存（如果 transcript_store 存在）
+        if hasattr(self.transcript_store, 'has_video') and \
+           self.transcript_store.has_video(video_id, owner_user_id=owner_user_id):
             return owner_user_id
 
-        transcript = self.video_repository.load_transcript(
-            video_id=video_id,
-            owner_user_id=owner_user_id,
-        )
-        chunks = self.video_repository.load_chunks(
-            video_id=video_id,
-            owner_user_id=owner_user_id,
-        )
+        # 2. 从 SQLite 加载（video_repository 支持时间戳）
+        transcript = self.video_repository.load_transcript(video_id, owner_user_id=owner_user_id)
+        chunks = self.video_repository.load_chunks(video_id, owner_user_id=owner_user_id)
 
         if transcript is None and owner_user_id != DEFAULT_OWNER_USER_ID:
             resolved_owner_user_id = DEFAULT_OWNER_USER_ID
-            transcript = self.video_repository.load_transcript(
-                video_id=video_id,
-                owner_user_id=resolved_owner_user_id,
-            )
-            chunks = self.video_repository.load_chunks(
-                video_id=video_id,
-                owner_user_id=resolved_owner_user_id,
-            )
+            transcript = self.video_repository.load_transcript(video_id, resolved_owner_user_id)
+            chunks = self.video_repository.load_chunks(video_id, resolved_owner_user_id)
         else:
             resolved_owner_user_id = owner_user_id
 
         if transcript is None:
             raise ValueError(f"Video transcript not found: {video_id}")
 
-        self.transcript_store.restore_video(
-            transcript=transcript,
-            chunks=chunks,
-            owner_user_id=resolved_owner_user_id,
-        )
+        # 3. 加载到内存缓存（如果 transcript_store 存在）
+        if hasattr(self.transcript_store, 'restore_video'):
+            self.transcript_store.restore_video(
+                transcript=transcript, chunks=chunks, owner_user_id=resolved_owner_user_id
+            )
+
         return resolved_owner_user_id
 
     def video_conversation_key(self, user_id: str, session_id: str, video_id: str) -> str:
@@ -349,3 +341,109 @@ class SimpleAgentService:
             messages.append({"role": turn.role, "content": turn.content})
 
         return self.llm_client.generate(messages)
+
+    def add_video_transcript_with_segments(
+                self,
+                video_id: str,
+                title: str,
+                segments: list[dict],
+                owner_user_id: str = DEFAULT_OWNER_USER_ID,
+        ) -> dict:
+        """直接接收带时间戳的 segments，绕过纯文本切分，保留时间戳"""
+        # 1. 构造 VideoTranscript（保留 start_time / end_time）
+        transcript_segments = [
+            TranscriptSegment(
+                text=s.get("text", ""),
+                start_time=s.get("start_time"),
+                end_time=s.get("end_time"),
+            )
+            for s in segments
+        ]
+        transcript = VideoTranscript(
+            video_id=video_id,
+            title=title,
+            segments=transcript_segments,
+        )
+
+        # 2. 持久化到 SQLite（video_repository 支持时间戳）
+        self.video_repository.save_transcript(transcript, owner_user_id=owner_user_id)
+
+        # 3. 切分 chunks（关键：带时间戳）
+        chunks = self._build_chunks_from_segments(transcript, max_chars=300)
+
+        # ===== 加日志确认 =====
+        for c in chunks:
+            print(f"[DEBUG] built chunk: id={c.chunk_id}, start={c.start_time}, end={c.end_time}")
+        # =====================
+
+        # 4. 保存 chunks（video_repository 支持时间戳）
+        self.video_repository.save_chunks(video_id, chunks, owner_user_id=owner_user_id)
+
+        # 5. 向量索引（vector_store 也支持时间戳）
+        self.index_video_chunks(video_id=video_id, owner_user_id=owner_user_id, chunks=chunks)
+
+        # 6. 尝试加载到内存缓存（如果 transcript_store 存在）
+        if hasattr(self.transcript_store, 'restore_video'):
+            self.transcript_store.restore_video(
+                transcript=transcript, chunks=chunks, owner_user_id=owner_user_id
+            )
+
+        return {
+            "video_id": video_id,
+            "title": title,
+            "segments_count": len(transcript_segments),
+            "chunks_count": len(chunks),
+        }
+
+
+    def _build_chunks_from_segments(self, transcript: VideoTranscript, max_chars: int = 800) -> list[TranscriptChunk]:
+        """按 max_chars 切分，chunk 的 start/end 取第一个和最后一个 segment 的时间戳"""
+        chunks = []
+        current_segments = []
+        current_length = 0
+        chunk_index = 0
+
+        for segment in transcript.segments:
+            seg_len = len(segment.text)
+            # 超过阈值且已有内容，则截断创建新 chunk
+            if current_length + seg_len > max_chars and current_segments:
+                '''
+                把每条字幕的时间戳放在字幕前面，例如
+                [42.1s] 我爱VideoMind
+                [43.4s] 我是麦
+                '''
+                chunk_text = "\n".join(
+                    f"[{seg.start_time:.1f}s] {seg.text}"
+                    for seg in current_segments
+                )
+                chunk = TranscriptChunk(
+                    chunk_id=f"{transcript.video_id}_chunk_{chunk_index}",
+                    video_id=transcript.video_id,
+                    text=chunk_text,
+                    start_time=current_segments[0].start_time,
+                    end_time=current_segments[-1].end_time,
+                )
+                chunks.append(chunk)
+                chunk_index += 1
+                current_segments = [segment]
+                current_length = seg_len
+            else:
+                current_segments.append(segment)
+                current_length += seg_len
+
+        # 最后一个 chunk
+        if current_segments:
+            chunk_text = "\n".join(
+                f"[{seg.start_time:.1f}s] {seg.text}"
+                for seg in current_segments
+            )
+            chunk = TranscriptChunk(
+                chunk_id=f"{transcript.video_id}_chunk_{chunk_index}",
+                video_id=transcript.video_id,
+                text=chunk_text,
+                start_time=current_segments[0].start_time,
+                end_time=current_segments[-1].end_time,
+            )
+            chunks.append(chunk)
+
+        return chunks

@@ -204,6 +204,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 异步处理核心逻辑
      * 将原来 summary 方法中的耗时操作（B站解析、字幕入库、Agent总结）全部移至此处
      * 处理完成后通过 SSE 推送给前端，并更新数据库状态
+     * 大概流程：
+     * java把url、cookie传给python，python进行字幕扒取写成JSON文件再返回
+     * java得到JSON文件后一条一条读取写入数据库
+     * 写入完数据库后把字幕全部返回给视频解析agent
+     * 视频解析agent得到结果再返回java端
      */
     private void doProcess(Long videoId, String baseUrl, Integer part,
         Long userId, String cookie, String sid) {
@@ -245,6 +250,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             int count = 0;
 
             List<Subtitle> subList = new ArrayList<>();
+            List<Map<String, Object>> segments = new ArrayList<>();
 
             for (Map<String, Object> track : subtitles) {
                 List<Map<String, Object>> body = (List<Map<String, Object>>) track.get("body");
@@ -263,6 +269,12 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
                     fullText.append(content).append("\n");
                     count++;
+
+                    Map<String, Object> seg = new HashMap<>();
+                    seg.put("text", content);
+                    seg.put("start_time", start);
+                    seg.put("end_time", end);
+                    segments.add(seg);
                 }
             }
 
@@ -284,6 +296,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             processReq.put("video_id", agentVideoId);
             processReq.put("title", title != null ? title : "");
             processReq.put("transcript_text", transcriptText);
+            processReq.put("segments", segments);
             processReq.put("user_id", String.valueOf(userId));
 
             // 使用 HttpURLConnection 直接发送，强制固定长度模式，避免 chunked 编码
@@ -626,6 +639,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             ObjectMapper mapper = new ObjectMapper();
             byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
+            // 手动HTTP连接
             URL agentUrl = new URL(agentServiceUrl + "/api/chat");
             HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
             conn.setRequestMethod("POST");
