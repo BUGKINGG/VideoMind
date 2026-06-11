@@ -105,9 +105,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         // 用redis对用户进行限流，限制每10秒只能进行一次总结，放置脚本刷爆token
         String limitKey = REDIS_USER_LIMIT + userId.toString();
-        Boolean allowed = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
-        if(!allowed) {
-            throw new RuntimeException("操作太频繁，请稍后再试")
+        // 如果redis没有开或者死亡，则放行并抛出log，否则会阻塞业务
+        try{
+            Boolean allowed = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
+            if(!allowed) {
+                throw new RuntimeException("操作太频繁，请稍后再试")
+            }
+        }catch {
+            log.warn("redis死亡，降级放行");
         }
 
         log.info("[Summary] 请求解析: rawUrl={}, baseUrl={}, part={}, userId={}", rawUrl, baseUrl, part, userId);
