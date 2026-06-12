@@ -83,9 +83,9 @@
           </button>
 
           <div class="feature-tags">
-            <span class="tag"> 智能字幕提取</span>
+            <span class="tag"> 视频内容提取</span>
             <span class="tag"> AI 结构化总结</span>
-            <span class="tag"> 多模态时间戳</span>
+            <span class="tag"> 对话学习助手</span>
           </div>
         </div>
       </div>
@@ -132,7 +132,7 @@
                 @input="autoResize"
                 @keydown.enter.prevent="sendMessage"
             ></textarea>
-            <button class="send-btn" @click="sendMessage">➤</button>
+            <button class="send-btn" @click="sendMessage" :disabled="isProcess">➤</button>
           </div>
         </div>
       </div>
@@ -205,7 +205,8 @@ const userStore = useUserStore()
 const userName = computed(() => userStore.username || "default name")
 const userUid = ref('19241001')
 const confirm_text = ref('开始总结')
-const isLoading = ref(false)  // 新增：控制按钮禁用和加载状态
+const isLoading = ref(false)
+const isProcess = ref(false)
 const userInitials = computed(() => {
   return userName.value
       .split(' ')
@@ -218,7 +219,7 @@ const userInitials = computed(() => {
 
 
 // ========== 历史记录 ==========
-const activeHistoryId = ref(1)
+const activeHistoryId = ref(null)
 const historyList = ref([ ])
 
 /**
@@ -372,7 +373,7 @@ function processSseChunk(chunk) {
 
     if (!dataStr) return
     const data = JSON.parse(dataStr)
-    console.log('[SSE] 收到事件:', eventName, data)  // 打开浏览器控制台看这条
+    console.log('[SSE] 收到事件:', eventName, data)
 
     if (eventName === 'connect') {
       console.log('SSE 已连接')
@@ -384,7 +385,8 @@ function processSseChunk(chunk) {
         // 第一次收到内容，替换占位消息
         messages.value[placeholderIndex] = {
           role: 'ai',
-          content: data.content,  // 流式阶段用纯文本，避免 markdown 解析不完整
+          // 流式阶段用纯文本，避免 markdown 解析不完整
+          content: data.content,
           isStreaming: true
         }
       } else {
@@ -394,7 +396,7 @@ function processSseChunk(chunk) {
           messages.value[idx].content = renderMarkdown(data.content)
         }
       }
-      nextTick(() => scrollToBottom())
+      scrollToBottom()
     }
     else if (eventName === 'message' && data.type === 'done') {
       // 流式完成：更新标题、字幕数，渲染最终 markdown
@@ -464,6 +466,9 @@ async function startSummary() {
       cookie: userStore.cookie
     })
 
+    // 后端返回 http 单次连接的消息
+    // 如果status=1，那么证明命中了缓存
+    // 如果不是，则sid肯定不为空，启动sse进行监听
     const { sessionId, status } = res.data
 
     // 命中缓存，直接展示
@@ -495,6 +500,10 @@ async function startSummary() {
     }]
 
     // 建立 SSE 连接监听流式结果
+    // 当 fetch 收到后端返回的响应头时即可放行
+    // 当后端发起emitter.complete时，http连接主动关闭
+    // 在连接时，二进制字节流数据持续传输
+    // reader接收二进制字节流，decoder将其译码
     const response = await fetch(`/agent/summary/stream?sid=${sessionId}`, {
       headers: { 'token': userStore.token }
     })
@@ -502,12 +511,13 @@ async function startSummary() {
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
+    // buffer 存放完整的被译码后的文本数据
     let buffer = ''
 
     while (true) {
       const { done, value } = await reader.read()
 
-      // 关键修复：流结束时，把 buffer 里剩余所有消息全部处理完再 break
+      // 流结束时，把 buffer 里剩余所有消息全部处理完再 break
       if (done) {
         const remaining = buffer.split('\n\n')
         for (const chunk of remaining) {
@@ -517,7 +527,39 @@ async function startSummary() {
       }
 
       buffer += decoder.decode(value, { stream: true })
+      /**
+       * SSE规定，每条信息以连续两个\n\n，如下：
+       *
+       * event: message
+       * data: {"type":"chunk","content":"你好"}
+       *
+       * event: message
+       * data: {"type":"done","summary":"..."}
+       *
+       * event: error
+       * data: {"message":"失败"}
+       *
+       *
+       * 每个chunk即是一条SSE消息
+       */
       const chunks = buffer.split('\n\n')
+      /**
+       * 因为字节流解码不是连续的，比如说对于一条SSE消息：
+       * event: message
+       * data: {"type":"chunk","content":"你好"}
+       *
+       * 实际上每次read得到的是
+       * 1:
+       * event: mes
+       * 2:
+       * sage\ndata
+       * 3:
+       * : {"type":"c
+       * 4:
+       * hunk","content":"你好"}\n\n
+       *
+       * pop()可以把chunks里最后的放回buffer，因为它可能是下一个SSE的内容，还不完整。
+       */
       buffer = chunks.pop() || ''
 
       for (const chunk of chunks) {
@@ -529,7 +571,7 @@ async function startSummary() {
     console.error('总结流程异常:', error)
     alert('请求失败: ' + (error.message || '请检查网络或登录状态'))
   } finally {
-    // 兜底：只有按钮还在加载状态时才重置（防止成功回调已经重置过）
+    // 只有按钮还在加载状态时才重置（防止成功回调已经重置过）
     if (isLoading.value) {
       isLoading.value = false
       confirm_text.value = '开始总结'
@@ -611,19 +653,22 @@ const messages = ref([])
 async function sendMessage() {
   const text = inputMessage.value.trim()
   if (!text) return
+  if(isProcess.value) return
+
+  isProcess.value = true
 
   // 1. 用户消息
   const userId = Date.now() + '_user'
   messages.value.push({ id: userId, role: 'user', content: text })
   inputMessage.value = ''
   autoResize()
-  nextTick(() => scrollToBottom())
+  scrollToBottom()
 
   // 2. AI 占位，记录固定索引
   const aiIndex = messages.value.length
   const aiId = Date.now() + '_ai'
   messages.value.push({ id: aiId, role: 'ai', content: '思考中...', isStreaming: true })
-  nextTick(() => scrollToBottom())
+  scrollToBottom()
 
   try {
     const res = await request.post('/agent/chat', {
@@ -656,6 +701,8 @@ async function sendMessage() {
   } catch (error) {
     console.error('发送失败:', error)
     messages.value.splice(aiIndex, 1, { id: messages.value[aiIndex]?.id, role: 'ai', content: '发送失败，请重试' })
+  } finally {
+    isProcess.value = false
   }
 }
 
@@ -680,7 +727,7 @@ function processChatChunk(chunk, aiIndex) {
         content: renderMarkdown(data.content || ''),
         isStreaming: true
       })
-      nextTick(() => scrollToBottom())
+      scrollToBottom()
     }
     else if (eventName === 'message' && data.type === 'done') {
       messages.value.splice(aiIndex, 1, {
@@ -1156,7 +1203,7 @@ function autoResize() {
 .message.user .message-content {
   background: #ffffff;
   color: #1f2937;
-  border-color:1px solid #e5e7eb;
+  border: 1px solid #e5e7eb;
 }
 
 :deep(.timestamp-badge) {
@@ -1209,7 +1256,7 @@ function autoResize() {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: var(--primary);
+  background: black;
   color: white;
   border: none;
   display: flex;
@@ -1220,8 +1267,12 @@ function autoResize() {
   transition: background 0.2s;
 }
 
-.send-btn:hover {
-  background: var(--primary-hover);
+.send-btn:enabled:hover {
+  background: #2d2d2d;
+}
+
+.send-btn:disabled {
+  background: #b41010;
 }
 
 .option-btn {

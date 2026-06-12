@@ -14,13 +14,6 @@ public interface AgentService extends IService<Video> {
 
     SummaryResult submitSummary(SummaryDTO summaryDTO);
 
-    /**
-     * 视频对话问答
-     * @param chatDTO 对话请求
-     * @return AI回复结果
-     */
-    ChatResult chat(ChatDTO chatDTO);
-
     ChatResult submitChat(ChatDTO chatDTO);
 
     SseEmitter connectChatSse(String sid);

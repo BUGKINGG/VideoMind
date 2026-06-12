@@ -258,20 +258,5 @@ class SummarizeRequest(BaseModel):
     title: str = ""
 
 
-@app.post("/summarize")
-def summarize(req: SummarizeRequest):
-    """Mock 视频总结 Agent"""
-    text = req.text[:1000] if req.text else "无字幕内容"
-    title = req.title or "未知视频"
-
-    mock_summary = f"""【Mock 总结】视频《{title}》内容摘要：
-
-{text[:300]}...
-
-（此处为 Mock 数据，仅用于前后端联调。真实 Agent 接入后，此接口返回真实 AI 总结。）
-"""
-    return {"code": 200, "summary": mock_summary}
-
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)

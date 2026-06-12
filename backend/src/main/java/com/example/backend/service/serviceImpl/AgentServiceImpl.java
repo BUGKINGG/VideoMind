@@ -108,8 +108,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         // 用redis对用户进行限流，限制每10秒只能进行一次总结，放置脚本刷爆token
         String limitKey = REDIS_USER_LIMIT + userId.toString();
         // 如果redis没有开或者死亡，则放行并抛出log，否则会阻塞业务
+        // 但实际上如果redis死亡，后面的业务都无法实现，前端会返回500
         try{
-            Boolean allowed = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
+            Boolean allowed = redisTemplate.opsForValue().
+                setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
             if(!allowed) {
                 throw new RuntimeException("操作太频繁，请稍后再试");
             }
@@ -120,16 +122,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         log.info("[Summary] 请求解析: rawUrl={}, baseUrl={}, part={}, userId={}", rawUrl, baseUrl, part, userId);
 
         // 先查询 video 数据表中有没有相同的url以及part，如果有则直接读取summary内容并且返回
+        // 免去SSE的建立
         // 要求同一baseUrl，同一part，status为1
         Video exist = videoMapper.selectOne(
             Wrappers.<Video>lambdaQuery()
                 .eq(Video::getUrl, baseUrl)
                 .eq(Video::getPart, part)
-                .eq(Video::getStatus, 1)
         );
 
-        // 如果有，那么直接返回summary
-        if (exist != null) {
+        // 如果有并且已经处理完（status为1），那么直接返回summary
+        if (exist != null && exist.getStatus() == 1) {
             log.info("[Summary] 命中缓存: videoId={}, title={}, url={}, part={}",
                 exist.getId(), exist.getTitle(), exist.getUrl(), exist.getPart());
             // 查询对应的conversation
@@ -155,16 +157,27 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return cache;
         }
 
+        // 如果status为2，说明之前处理失败，把记录删除然后重新处理
+        if(exist != null && exist.getStatus() == 2){
+            log.info("删除处理失败的视频重新处理");
+            videoMapper.deleteById(exist);
+        }
+
         log.info("[Summary] 未命中缓存，创建新记录: baseUrl={}, part={}", baseUrl, part);
 
         // 构造分布式锁
+        // 如果同时有多个用户并发的解析同一个视频，会导致数据库有多条相同的数据
+        // 由于对redis是单进程的，而且指令的执行是单线程，因此所有请求会在redis中排队
+        // 当有用户的线程拿到了锁，则该用户得到唯一的密码，否则返回null
         String lockKey = REDIS_LOCK_VIDEO_PREFIX + baseUrl + ":" + part;
         String lockValue = redisLockUtil.tryLock(lockKey, Duration.ofSeconds(30));
 
        if (lockValue != null) {
-            // ===== 获取锁成功 =====
+            // 获取锁成功，仅允许带了锁的线程对视频进行CRUD和解析（免得浪费token)
             try {
                 // 3. 双重检查：拿到锁后再查一次（等锁期间可能别人已经创建好了）
+                // 这两次检查不能合并，如果不要上面的检查，会导致只有拿到锁的线程才能查到缓存
+                // 导致并行退化成串行（都被迫等到自己拿锁）
                 exist = videoMapper.selectOne(
                     Wrappers.<Video>lambdaQuery()
                         .eq(Video::getUrl, baseUrl)
@@ -207,6 +220,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 redisTemplate.opsForValue().set(redisKey, videoId.toString(),
                     Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
+                // 异步编程，相当于信使，告诉 doProcess 函数开始工作，任何继续往下走
                 CompletableFuture.runAsync(() ->
                     doProcess(videoId, baseUrl, part, userId, cookie, sid));
 
@@ -223,7 +237,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             }
         }
 
-        // ========== 7. 获取锁失败：别人正在创建/处理，轮询等待 ==========
+        // 7. 获取锁失败：别人正在创建/处理，轮询等待
         log.info("[Summary] 获取锁失败，进入轮询等待: baseUrl={}, part={}", baseUrl, part);
 
         for (int i = 0; i < LOCK_MAX_RETRY; i++) {
@@ -334,10 +348,24 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         Long videoId = Long.valueOf(videoIdStr);
 
-        // 如果视频已经出理完了，直接返回结果
+
+        // 如果视频已经处理完了，直接返回结果
         Video video = videoMapper.selectById(videoId);
+        if(video != null && video.getStatus() == 2) {
+            SseEmitter failEmitter = new SseEmitter(30_000L);
+            try{
+                failEmitter.send(SseEmitter.event()
+                    .name("error")
+                    .data("{\"type\":\"error\",\"message\":\"cookie已过期或者该视频没有字幕\"}")
+                );
+            } catch (Exception e){
+                log.info("返回fail错误：", e);
+            }
+            return failEmitter;
+        }
+
         if(video != null && video.getStatus() == 1){
-            SseEmitter emitter = new SseEmitter(30_000L);
+            SseEmitter emitter = new SseEmitter(0L);
             try {
                 Conversation existConv = conversationMapper.selectOne(
                     Wrappers.<Conversation>lambdaQuery()
@@ -401,7 +429,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 处理完成后通过 SSE 推送给前端，并更新数据库状态
      * 大概流程：
      * java把url、cookie传给python，python进行字幕扒取写成JSON文件再返回
-     * java得到JSON文件后一条一条读取写入数据库
+     * java得到JSON文件后一条一条读取，然后一次性写入数据库
      * 写入完数据库后把字幕全部返回给视频解析agent
      * 视频解析agent得到结果再返回java端
      */
@@ -439,6 +467,20 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             log.info("[Agent] parse返回: title={}, bvid={}, 字幕轨道数={}",
                 title, bvid, result.get("subtitles") != null ? ((List)result.get("subtitles")).size() : 0);
             List<Map<String, Object>> subtitles = (List<Map<String, Object>>) result.get("subtitles");
+
+            // 如果字幕为空，那么是cookie失效了或者该视频没有字幕
+            if(subtitles == null || subtitles.isEmpty()){
+                pushError(sid, "cookie已过期或者该视频没有字幕");
+                // 更新 video 为完成状态
+                Video fail = new Video();
+                fail.setId(videoId);
+                fail.setTitle(title);
+                fail.setSummary("cookie已过期或该视频没有字幕");
+                fail.setStatus(2);
+                fail.setSubtitleCount(0);
+                videoMapper.updateById(fail);
+                return;
+            }
 
             // 得到JSON数据的返回，解析每条subtitle，把完整信息插入数据表
             StringBuilder fullText = new StringBuilder();
@@ -657,124 +699,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
     }
 
-    /**
-     * 视频对话问答
-     * 1. 根据conversationId找到对应的video
-     * 2. 构造agentVideoId，调用Python Agent的/api/chat
-     * 3. 保存用户消息和AI回复到message表
-     * 4. 更新conversation的更新时间
-     */
-    @Override
-    public ChatResult chat(ChatDTO chatDTO) {
-        Long userId = BaseContext.getCurrentId();
-        Long conversationId = chatDTO.getConversationId();
-        String message = chatDTO.getMessage();
-
-        log.info("[Chat] userId={}, conversationId={}, message={}", userId, conversationId, message);
-
-        // 1. 查询conversation获取videoId
-        Conversation conversation = conversationMapper.selectById(conversationId);
-        if (conversation == null) {
-            throw new RuntimeException("对话记录不存在");
-        }
-        if (!conversation.getUserId().equals(userId)) {
-            throw new RuntimeException("无权访问该对话");
-        }
-
-        Long videoId = conversation.getVideoId();
-        Video video = videoMapper.selectById(videoId);
-        if (video == null) {
-            throw new RuntimeException("视频记录不存在");
-        }
-
-        // 2. 构造agentVideoId
-        String agentVideoId = redisTemplate.opsForValue().get(REDIS_SSE_CHAT_PREFIX + videoId.toString());
-        if (agentVideoId == null) {
-            // fallback: 从url提取bvid
-            String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
-            if (bvid == null) {
-                throw new RuntimeException("无法确定视频标识，请重新提交视频链接");
-            }
-            agentVideoId = bvid + "_p" + video.getPart();
-        }
-
-        // 3. 调用Python Agent /api/chat
-        String sessionId = conversationId.toString();
-        Map<String, Object> chatReq = new HashMap<>();
-        chatReq.put("user_id", String.valueOf(userId));
-        chatReq.put("session_id", sessionId);
-        chatReq.put("video_id", agentVideoId);
-        chatReq.put("question", message);
-
-        Map<String, Object> agentResult;
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
-
-            URL agentUrl = new URL(agentServiceUrl + "/api/chat");
-            HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            conn.setDoOutput(true);
-            conn.setDoInput(true);
-            conn.setFixedLengthStreamingMode(bodyBytes.length);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(60000);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(bodyBytes);
-                os.flush();
-            }
-
-            int responseCode = conn.getResponseCode();
-            InputStream responseStream = (responseCode < 400)
-                ? conn.getInputStream()
-                : conn.getErrorStream();
-            agentResult = mapper.readValue(responseStream, Map.class);
-            conn.disconnect();
-
-            log.info("[Chat] Agent返回: {}", agentResult);
-        } catch (Exception e) {
-            log.error("[Chat] 调用Agent服务失败", e);
-            throw new RuntimeException("AI服务调用失败: " + e.getMessage());
-        }
-
-        String answer = (agentResult != null && agentResult.get("answer") != null)
-            ? (String) agentResult.get("answer")
-            : "抱歉，AI暂时无法回答您的问题。";
-
-        // 4. 保存用户消息
-        Message userMsg = new Message();
-        userMsg.setConversationId(conversationId);
-        userMsg.setRole("user");
-        userMsg.setContent(message);
-        userMsg.setCreatedAt(LocalDateTime.now());
-        messageMapper.insert(userMsg);
-
-        // 5. 保存AI回复
-        Message aiMsg = new Message();
-        aiMsg.setConversationId(conversationId);
-        aiMsg.setRole("ai");
-        aiMsg.setContent(answer);
-        aiMsg.setCreatedAt(LocalDateTime.now());
-        messageMapper.insert(aiMsg);
-
-        // 6. 更新conversation时间
-        Conversation updateConv = new Conversation();
-        updateConv.setId(conversationId);
-        updateConv.setUpdatedAt(LocalDateTime.now());
-        conversationMapper.updateById(updateConv);
-
-        // 7. 构建返回结果
-        ChatResult result = new ChatResult();
-        result.setAnswer(answer);
-
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> sources = (List<Map<String, Object>>) agentResult.get("sources");
-        result.setSources(sources);
-
-        return result;
-    }
 
     @Transactional
     public ChatResult submitChat(ChatDTO chatDTO) {
@@ -831,7 +755,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         conversationId = Long.valueOf(parts[0]);
         userMessageId = Long.valueOf(parts[1]);
     } else {
-        // 兼容旧格式：只保存了 conversationId
         conversationId = Long.valueOf(convIdStr);
     }
 
