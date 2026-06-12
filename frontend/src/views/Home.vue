@@ -106,7 +106,7 @@
         <div class="chat-messages" ref="messagesContainer">
   <div
       v-for="(msg, index) in messages"
-      :key="index"
+      :key="msg.id"
       class="message"
       :class="msg.role"
   >
@@ -305,12 +305,14 @@ async function selectHistory(id) {
     videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
 
     if(data.messages && data.messages.length > 0){
-      messages.value = data.messages.map(msg => ({
+      messages.value = data.messages.map((msg, idx) => ({
+        id: (msg.id || `hist_${idx}_${Date.now()}`),
         role: msg.role,
         content: msg.role ===  'ai' ? renderMarkdown(msg.content) : msg.content
       }))
     }else {
       messages.value = [{
+        id: Date.now() + '_summary',
         role: 'ai',
         content: renderMarkdown(data.summary || '暂无总结')
       }]
@@ -471,6 +473,7 @@ async function startSummary() {
       currentConversationId.value = res.data.conversationId || null
       currentVideoId.value = res.data.videoId || null
       messages.value = [{
+        id: Date.now() + '_summary',
         role: 'ai',
         content: renderMarkdown(res.data.summary || '')
       }]
@@ -485,6 +488,7 @@ async function startSummary() {
     currentVideoTitle.value = videoUrl.value
     subtitleCount.value = 0
     messages.value = [{
+      id: Date.now() + '_placeholder',
       role: 'ai',
       content: '正在解析视频内容并生成总结，请稍候...',
       isPlaceholder: true
@@ -609,14 +613,16 @@ async function sendMessage() {
   if (!text) return
 
   // 1. 用户消息
-  messages.value.push({ role: 'user', content: text })
+  const userId = Date.now() + '_user'
+  messages.value.push({ id: userId, role: 'user', content: text })
   inputMessage.value = ''
   autoResize()
   nextTick(() => scrollToBottom())
 
   // 2. AI 占位，记录固定索引
   const aiIndex = messages.value.length
-  messages.value.push({ role: 'ai', content: '思考中...', isStreaming: true })
+  const aiId = Date.now() + '_ai'
+  messages.value.push({ id: aiId, role: 'ai', content: '思考中...', isStreaming: true })
   nextTick(() => scrollToBottom())
 
   try {
@@ -649,7 +655,7 @@ async function sendMessage() {
     }
   } catch (error) {
     console.error('发送失败:', error)
-    messages.value.splice(aiIndex, 1, { role: 'ai', content: '发送失败，请重试' })
+    messages.value.splice(aiIndex, 1, { id: messages.value[aiIndex]?.id, role: 'ai', content: '发送失败，请重试' })
   }
 }
 
@@ -667,8 +673,9 @@ function processChatChunk(chunk, aiIndex) {
     console.log('[Chat SSE]', eventName, data)  // 调试用，确认收到数据
 
     if (eventName === 'message' && data.type === 'chunk') {
-      // 用 splice 强制触发 Vue 响应式
+      // 用 splice 强制触发 Vue 响应式，保留同一 AI 消息的 id
       messages.value.splice(aiIndex, 1, {
+        id: messages.value[aiIndex]?.id,
         role: 'ai',
         content: renderMarkdown(data.content || ''),
         isStreaming: true
@@ -677,6 +684,7 @@ function processChatChunk(chunk, aiIndex) {
     }
     else if (eventName === 'message' && data.type === 'done') {
       messages.value.splice(aiIndex, 1, {
+        id: messages.value[aiIndex]?.id,
         role: 'ai',
         content: renderMarkdown(data.answer || data.content || '')
       })
@@ -684,6 +692,7 @@ function processChatChunk(chunk, aiIndex) {
     }
     else if (eventName === 'error') {
       messages.value.splice(aiIndex, 1, {
+        id: messages.value[aiIndex]?.id,
         role: 'ai',
         content: '出错: ' + (data.message || '未知错误')
       })

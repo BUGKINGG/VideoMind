@@ -80,3 +80,53 @@ class AnthropicLLMClient(LLMClient):
                 return content.strip()
         # 兜底：如果 content 为空（比如思考模型占满 token），返回原始 JSON 调试
         return json.dumps(data, ensure_ascii=False)
+
+    def generate_stream(self, messages: list[dict[str, str]]):
+        """流式调用 LLM，逐 token yield"""
+        if not self.config.auth_token or not self.config.base_url or not self.config.model:
+            yield "LLM is not configured yet. Please set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in .env."
+            return
+
+        url = self.config.base_url.rstrip("/") + "/v1/chat/completions"
+        payload = {
+            "model": self.config.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages,
+            "stream": True,
+        }
+        body = json.dumps(payload).encode("utf-8")
+
+        request = urllib.request.Request(
+            url=url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.auth_token}",
+                "x-api-key": self.config.auth_token,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=120) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        choices = data.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                yield content
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            yield f"\n[生成错误: {e}]"

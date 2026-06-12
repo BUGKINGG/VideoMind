@@ -66,3 +66,23 @@ class VideoQA:
             f"相关字幕片段：\n{relevant_context or '没有找到相关字幕'}\n\n"
             f"用户问题：{question}\n\n"
         )
+
+    '''
+    流式输出
+    '''
+    def answer_stream(
+                self,
+                transcript: VideoTranscript,
+                question: str,
+                relevant_chunks: list[TranscriptChunk],
+                history: list[ChatTurn],
+        ):
+        """流式回答，逐 token yield"""
+        prompt = self.build_prompt(
+            transcript=transcript,
+            question=question,
+            relevant_chunks=relevant_chunks,
+            history=history,
+        )
+        for token in self.llm_client.generate_stream([{"role": "user", "content": prompt}]):
+            yield token

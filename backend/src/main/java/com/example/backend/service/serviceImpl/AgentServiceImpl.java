@@ -29,7 +29,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -74,7 +76,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     // ========== 已经迁移到 Redis 的 ==========
     // key: videomind:sse:summary:{sid}  value: videoId
-    // key: videomind:sse:chat:{sid}     value: conversationId
+    // key: videomind:sse:chat:{sid}     value: conversationId:userMessageId
     // key: videomind:video:agent_id:{videoId}  value: agentVideoId
 
     private static final String REDIS_SSE_SUMMARY_PREFIX = "videomind:sse:summary:";
@@ -109,9 +111,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         try{
             Boolean allowed = redisTemplate.opsForValue().setIfAbsent(limitKey, "1", Duration.ofSeconds(10));
             if(!allowed) {
-                throw new RuntimeException("操作太频繁，请稍后再试")
+                throw new RuntimeException("操作太频繁，请稍后再试");
             }
-        }catch {
+        }catch(Exception e){
             log.warn("redis死亡，降级放行");
         }
 
@@ -497,16 +499,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             ObjectMapper mapper = new ObjectMapper();
             byte[] bodyBytes = mapper.writeValueAsBytes(processReq);
 
-            URL agentUrl = new URL(agentServiceUrl + "/api/process");
+            URL agentUrl = new URL(agentServiceUrl + "/api/process/stream");
             HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             conn.setDoOutput(true);
             conn.setDoInput(true);
             conn.setFixedLengthStreamingMode(bodyBytes.length);
-            // 建议加上超时，防止 Python 服务挂了 Java 一直等
             conn.setConnectTimeout(10000);
-            conn.setReadTimeout(120000); // 2分钟读取超时
+            // 5分钟超时
+            conn.setReadTimeout(300000);
 
             try (OutputStream os = conn.getOutputStream()) {
                 os.write(bodyBytes);
@@ -514,16 +516,38 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             }
 
             int responseCode = conn.getResponseCode();
-            InputStream responseStream = (responseCode < 400)
+            InputStream stream = (responseCode < 400)
                 ? conn.getInputStream()
                 : conn.getErrorStream();
-            Map processResult = mapper.readValue(responseStream, Map.class);
-            conn.disconnect();
 
-            System.out.println("[Agent] process返回: " + processResult);
-            String summary = (processResult != null && processResult.get("summary") != null)
-                ? (String) processResult.get("summary")
-                : "总结生成失败";
+            // 逐行读取 SSE
+            StringBuilder summaryBuilder = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(stream, "UTF-8"))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data: ")) continue;
+                    String jsonStr = line.substring(6).trim();
+                    if (jsonStr.isEmpty()) continue;
+
+                    Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
+                    String type = (String) data.get("type");
+
+                    if ("chunk".equals(type)) {
+                        String content = (String) data.get("content");
+                        if (content != null) {
+                            summaryBuilder = new StringBuilder(content);
+                            pushChunk(sid, content);
+                        }
+                    } else if ("done".equals(type)) {
+                        break;
+                    } else if ("error".equals(type)) {
+                        throw new RuntimeException((String) data.get("message"));
+                    }
+                }
+            }
+
+            String summary = summaryBuilder.toString();
 
             // 更新 video 为完成状态
             Video finish = new Video();
@@ -554,20 +578,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             message.setCreatedAt(LocalDateTime.now());
             messageMapper.insert(message);
 
-            // ========== SSE 流式推送总结给前端 ==========
-            // 把总结内容逐段推送，模拟流式打字机效果
-            int step = 20;
-            for (int i = 0; i < summary.length(); i += step) {
-                int end = Math.min(i + step, summary.length());
-                String chunk = summary.substring(0, end);
-                pushChunk(sid, chunk);
-                try {
-                    Thread.sleep(40);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
             // 最后推送完成事件，携带完整数据
             pushDone(sid, videoId, conversationId, title, summary, count);
 
@@ -782,7 +792,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         String sid = UUID.randomUUID().toString();
         String redisKey = REDIS_SSE_CHAT_PREFIX + sid;
-        redisTemplate.opsForValue().set(redisKey, conversationId.toString(), Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
+        // 同时记录 conversationId 与当前用户消息 ID，SSE 连接时用于精确识别“本次请求”的 AI 回复
+        redisTemplate.opsForValue().set(redisKey,
+                conversationId + ":" + userMsg.getId(),
+                Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
         CompletableFuture.runAsync(() -> doChatProcess(sid, conversationId, userId, message));
 
@@ -811,15 +824,25 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         return deadEmitter;
     }
 
-    Long conversationId = Long.valueOf(convIdStr);
+    Long conversationId;
+    Long userMessageId = null;
+    if (convIdStr.contains(":")) {
+        String[] parts = convIdStr.split(":");
+        conversationId = Long.valueOf(parts[0]);
+        userMessageId = Long.valueOf(parts[1]);
+    } else {
+        // 兼容旧格式：只保存了 conversationId
+        conversationId = Long.valueOf(convIdStr);
+    }
 
     // 2. 双重检查：后台线程 doChatProcess 可能已经跑完了
-    // 查 message 表，看是否已有 AI 回复
+    // 查 message 表，看是否已有属于本次用户消息的 AI 回复（id 大于当前用户消息 id）
     Message latestAiMsg = messageMapper.selectOne(
         Wrappers.<Message>lambdaQuery()
             .eq(Message::getConversationId, conversationId)
             .eq(Message::getRole, "ai")
-            .orderByDesc(Message::getCreatedAt)
+            .gt(userMessageId != null, Message::getId, userMessageId)
+            .orderByDesc(Message::getId)
             .last("LIMIT 1")
     );
 
@@ -869,13 +892,15 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             Long videoId = conversation.getVideoId();
             Video video = videoMapper.selectById(videoId);
 
-            String agentVideoId = redisTemplate.opsForValue().get(REDIS_VIDEO_AGENT_PREFIX + videoId.toString());
+            // 构造 agentVideoId
+            String agentVideoId = redisTemplate.opsForValue()
+                .get(REDIS_VIDEO_AGENT_PREFIX + videoId.toString());
             if (agentVideoId == null) {
                 String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
                 agentVideoId = bvid + "_p" + video.getPart();
             }
 
-            // 调用 Python /api/chat（同步）
+            // 调用 Python /api/chat/stream（流式接口）
             Map<String, Object> chatReq = new HashMap<>();
             chatReq.put("user_id", String.valueOf(userId));
             chatReq.put("session_id", conversationId.toString());
@@ -884,8 +909,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             ObjectMapper mapper = new ObjectMapper();
             byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
-            // 手动HTTP连接
-            URL agentUrl = new URL(agentServiceUrl + "/api/chat");
+
+            URL agentUrl = new URL(agentServiceUrl + "/api/chat/stream");
             HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
@@ -893,20 +918,49 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             conn.setDoInput(true);
             conn.setFixedLengthStreamingMode(bodyBytes.length);
             conn.setConnectTimeout(10000);
-            conn.setReadTimeout(60000);
-            try (OutputStream os = conn.getOutputStream()) { os.write(bodyBytes); os.flush(); }
+            conn.setReadTimeout(300000); // 流式需要更长超时，5分钟
 
-            Map agentResult = mapper.readValue(
-                (conn.getResponseCode() < 400 ? conn.getInputStream() : conn.getErrorStream()),
-                Map.class
-            );
-            conn.disconnect();
-
-            if (agentResult.containsKey("error")) {
-                throw new RuntimeException("Agent错误: " + agentResult.get("error"));
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bodyBytes);
+                os.flush();
             }
-            String answer = (String) agentResult.get("answer");
-            if (answer == null) answer = "抱歉，AI暂时无法回答您的问题。";
+
+            int responseCode = conn.getResponseCode();
+            InputStream stream = (responseCode < 400)
+                ? conn.getInputStream()
+                : conn.getErrorStream();
+
+            // 逐行读取 Python 的 SSE 流
+            StringBuilder answerBuilder = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(stream, "UTF-8"))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!line.startsWith("data: ")) continue;
+                    String jsonStr = line.substring(6).trim();
+                    if (jsonStr.isEmpty()) continue;
+
+                    Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
+                    String type = (String) data.get("type");
+
+                    if ("chunk".equals(type)) {
+                        String content = (String) data.get("content");
+                        if (content != null) {
+                            // Python 推的是增量 token，Java 累积
+                            // 但这里 content 已经是累积字符串（Python 端拼接的）
+                            answerBuilder = new StringBuilder(content);
+                            pushChunk(sid, content); // 立刻透传给前端
+                        }
+                    } else if ("done".equals(type)) {
+                        // 流正常结束
+                        break;
+                    } else if ("error".equals(type)) {
+                        throw new RuntimeException((String) data.get("message"));
+                    }
+                }
+            }
+
+            String answer = answerBuilder.toString();
 
             // 保存 AI 回复
             Message aiMsg = new Message();
@@ -922,16 +976,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             upd.setUpdatedAt(LocalDateTime.now());
             conversationMapper.updateById(upd);
 
-            // 伪流式推送（复用 pushChunk）
-            int step = 20;
-            for (int i = 0; i < answer.length(); i += step) {
-                int end = Math.min(i + step, answer.length());
-                String chunk = answer.substring(0, end);
-                pushChunk(sid, chunk);
-                try { Thread.sleep(40); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-            }
-
-            // 推送 done
+            // 推送 done（携带完整数据）
             pushChatDone(sid, conversationId, answer);
 
         } catch (Exception e) {

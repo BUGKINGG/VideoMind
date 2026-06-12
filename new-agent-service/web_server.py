@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.agent.service import SimpleAgentService
-
+from app.models import ChatTurn
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
@@ -47,14 +47,11 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self._read_json()
-            if path == "/api/chat":
-                self._handle_chat(body)
+            if path == "/api/chat/stream":
+                self._handle_chat_stream(body)
                 return
-            if path == "/api/summary":
-                self._handle_summary(body)
-                return
-            if path == "/api/process":
-                self._handle_process(body)
+            if path == "/api/process/stream":
+                self._handle_process_stream(body)
                 return
             self._send_json({"error": "API route not found"}, status=HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError) as error:
@@ -64,66 +61,6 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         except Exception as error:
             self._send_json({"error": f"Unexpected server error: {error}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    def _handle_chat(self, body: dict) -> None:
-        user_id = self._required(body, "user_id")
-        session_id = self._required(body, "session_id")
-        video_id = self._required(body, "video_id")
-        question = self._required(body, "question")
-
-        result = agent.run_agent(
-            user_id=user_id,
-            session_id=session_id,
-            video_id=video_id,
-            message=question,
-        )
-        self._send_json(result)
-
-    def _handle_summary(self, body: dict) -> None:
-        video_id = self._required(body, "video_id")
-        owner_user_id = body.get("user_id") or "__shared__"
-        self._send_json(agent.summarize_video(video_id, owner_user_id=owner_user_id))
-
-    def _handle_process(self, body: dict) -> None:
-        """
-        一体化接口：接收字幕文本 → 存储 → 切块 → 索引 → 总结 → 返回结果
-        供 Java 后端调用
-        """
-        print(f"[DEBUG] /api/process body keys: {list(body.keys())}")
-        video_id = self._required(body, "video_id")
-        title = self._required(body, "title")
-        transcript_text = self._required(body, "transcript_text")
-        user_id = body.get("user_id") or "__shared__"
-        segments = body.get("segments")
-
-        print(f"[DEBUG] /api/process: video_id={video_id}, title={title[:30] if title else 'EMPTY'}, user_id={user_id}, text_len={len(transcript_text)}")
-
-        # 1. 存储字幕（优先用结构化 segments，否则 fallback 纯文本）
-        if segments is not None and len(segments) > 0:
-            print(f"[DEBUG] 使用 segments 路径，共 {len(segments)} 条")
-            agent.add_video_transcript_with_segments(
-                video_id=video_id,
-                title=title,
-                segments=segments,
-                owner_user_id=user_id,
-            )
-        else:
-            print(f"[DEBUG] 使用纯文本路径")
-            agent.add_video_transcript(
-                video_id=video_id,
-                title=title,
-                transcript_text=transcript_text,
-                owner_user_id=user_id,
-            )
-
-        # 3. 生成总结
-        result = agent.summarize_video(video_id=video_id, owner_user_id=user_id)
-
-        self._send_json({
-            "code": 200,
-            "video_id": result["video_id"],
-            "title": result["title"],
-            "summary": result["summary"],
-        })
 
     def _read_json(self) -> dict:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -147,6 +84,151 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+    def _handle_chat_stream(self, body: dict) -> None:
+        """对话流式接口：边生成边推 SSE"""
+        user_id = str(body.get("user_id", "__shared__"))
+        session_id = str(body.get("session_id", "default"))
+        video_id = body.get("video_id")
+        question = body.get("question")
+
+        if not video_id or not question:
+            self._send_sse_error("video_id and question are required")
+            return
+
+        # 设置 SSE 响应头
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        try:
+            # 加载上下文
+            resolved_owner = agent._ensure_video_loaded(video_id, user_id)
+            transcript = agent.transcript_store.get_transcript(video_id, resolved_owner)
+            chunks = agent.find_relevant_video_chunks(
+                user_id=user_id,
+                video_id=video_id,
+                question=question,
+                transcript_owner_user_id=resolved_owner,
+            )
+            history = agent._get_or_load_history(
+                f"{user_id}:{session_id}:{video_id}",
+                user_id=user_id,
+                session_id=session_id,
+                video_id=video_id,
+            )
+
+            # 流式生成
+            full_answer = []
+            for token in agent.video_qa.answer_stream(transcript, question, chunks, history):
+                full_answer.append(token)
+                payload = json.dumps({
+                    "type": "chunk",
+                    "content": "".join(full_answer),
+                }, ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+            # 保存对话（流结束后）
+            answer = "".join(full_answer)
+            user_turn = ChatTurn(role="user", content=question)
+            assistant_turn = ChatTurn(role="assistant", content=answer)
+            history.append(user_turn)
+            history.append(assistant_turn)
+            agent.conversation_repository.add_turn(user_id, session_id, user_turn, video_id=video_id)
+            agent.conversation_repository.add_turn(user_id, session_id, assistant_turn, video_id=video_id)
+
+            # 推 done
+            done_payload = json.dumps({
+                "type": "done",
+                "answer": answer,
+                "sources": [
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "text": chunk.text,
+                        "start_time": chunk.start_time,
+                        "end_time": chunk.end_time,
+                    }
+                    for chunk in chunks
+                ],
+            }, ensure_ascii=False)
+            self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        except Exception as e:
+            self._send_sse_error(str(e))
+
+    def _handle_process_stream(self, body: dict) -> None:
+        """视频处理流式接口：存字幕 → 索引 → 流式总结"""
+        video_id = self._required(body, "video_id")
+        title = self._required(body, "title")
+        transcript_text = self._required(body, "transcript_text")
+        user_id = body.get("user_id") or "__shared__"
+        segments = body.get("segments")
+
+        # 设置 SSE 头
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        try:
+            # 1. 存字幕
+            if segments is not None and len(segments) > 0:
+                agent.add_video_transcript_with_segments(
+                    video_id=video_id, title=title, segments=segments, owner_user_id=user_id
+                )
+            else:
+                agent.add_video_transcript(
+                    video_id=video_id, title=title, transcript_text=transcript_text, owner_user_id=user_id
+                )
+                agent.build_video_chunks(video_id=video_id, owner_user_id=user_id)
+
+            # ===== 关键修复：强制从 SQLite 加载到内存缓存 =====
+            resolved_owner = agent._ensure_video_loaded(video_id, user_id)
+            # =====================================================
+
+            # 2. 准备总结（用 resolved_owner，确保内存里有数据）
+            transcript = agent.transcript_store.get_transcript(video_id, owner_user_id=resolved_owner)
+            chunks = agent.transcript_store.get_or_build_chunks(video_id, owner_user_id=resolved_owner)
+
+            # 3. 流式总结
+            full_summary = []
+            for token in agent.video_summarizer.summarize_stream(transcript=transcript, chunks=chunks):
+                full_summary.append(token)
+                payload = json.dumps({
+                    "type": "chunk",
+                    "content": "".join(full_summary),
+                }, ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+            # 4. 推 done
+            summary = "".join(full_summary)
+            done_payload = json.dumps({
+                "type": "done",
+                "video_id": video_id,
+                "title": title,
+                "summary": summary,
+            }, ensure_ascii=False)
+            self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        except Exception as e:
+            self._send_sse_error(str(e))
+
+    def _send_sse_error(self, message: str) -> None:
+        """在 SSE 流中发送错误事件"""
+        try:
+            payload = json.dumps({"type": "error", "message": message}, ensure_ascii=False)
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except Exception:
+            pass
 
 
 def main() -> None:

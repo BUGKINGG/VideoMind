@@ -86,3 +86,22 @@ class VideoSummarizer:
             f"视频标题：{title}\n\n"
             f"分段总结：\n\n{chunks_text}"
         )
+
+    def summarize_stream(self, transcript: VideoTranscript, chunks: list[TranscriptChunk]):
+        """
+        流式总结：chunk summary 阶段同步（必须等所有 chunk 总结完），
+        final summary 阶段流式输出
+        """
+        # 1. 同步阶段：逐 chunk 总结（这部分无法流式，必须等全部完成）
+        chunk_summaries = [
+            self.summarize_chunk(transcript.title, chunk.text)
+            for chunk in chunks
+        ]
+
+        # 2. 流式阶段：final summary 逐 token 产出
+        final_prompt = self.build_final_summary_prompt(
+            title=transcript.title,
+            chunk_summaries=chunk_summaries,
+        )
+        for token in self.llm_client.generate_stream([{"role": "user", "content": final_prompt}]):
+            yield token
