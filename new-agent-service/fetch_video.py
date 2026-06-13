@@ -45,7 +45,7 @@ def pick_chinese_subtitle(subs: List[Dict]) -> List[Dict]:
     if zh_subs:
         return zh_subs
 
-    # 3. 兜底（调试阶段建议保留，方便看到底有哪些轨道）
+    # 3. 调试
     print(f"[警告] 未找到中文字幕，可用轨道: {[s.get('lan') for s in subs]}，fallback 取第一个")
     return [subs[:1]]  # 只取第一个，避免多轨道都下载
 
@@ -147,6 +147,7 @@ async def fetch_subtitle_body(sub_url: str, cookies: Dict[str, str] = None) -> L
     return body
 
 
+# FIXME :这里用的绝对路径，要改，放的是字幕文件保存的位置
 def save_to_files(
         title: str, bvid: str, results: List[Dict[str, Any]], out_dir: str = r"D:\Projects\subs"
 ):

@@ -184,6 +184,9 @@
             <p><strong>VideoMind</strong> — 视频学习总结助手</p>
             <p>版本：v0.1.0</p>
             <p>基于 AI Agent 技术，支持字幕提取、结构化总结与多模态时间戳分析。</p>
+            <p>如有疑问请联系：</p>
+            <p>麦生：1062362280@qq.com</p>
+            <p>麦生：1924153440@qq.com</p>
           </div>
           <div class="modal-actions">
             <button class="modal-btn primary" @click="showAboutModal = false">知道了</button>
@@ -1282,7 +1285,7 @@ function autoResize() {
   color: #757474;
   border-radius: 12px;
   transition-duration: 0.2s;
-  margin-left: 20px;
+  margin-left: 50px;
   width: 50px;
   height: 30px;
 }

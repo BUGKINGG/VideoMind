@@ -101,6 +101,34 @@ VideoMind/
     └── requirements.txt
 ```
 
+## How to use
+1. 把项目clone下来，两种方式
+```shell
+# 方式1：在目标文件夹右键打开控制台：
+git clone https://github.com/BUGKINGG/VideoMind
+
+# 方式2：直接打开控制台
+git clone https://github.com/BUGKINGG/VideoMind D:/videoMind(your path)
+```
+
+2. clone完成后，在idea里以此为项目打开。并且用 maven 进行 compile 安装依赖
+3. 在idea的项目树中找到 `frontend` 文件夹，右键/打开于/终端。在终端输入：
+```shell
+npm install #自动在package包安装对应包环境
+npm run dev #运行vite，点击连接即可进入前端
+```
+4. 配置环境变量，在 java 端的 `application.yml` 文件中改写自己的配置文件（mysql和redis）
+5. 配置自己的 deepseek api，在 `new-agent-service` 目录下新建 `.env` 文件，填入自己的 api信息，使用 openAI格式。
+```text
+ANTHROPIC_AUTH_TOKEN=sk-xxx
+ANTHROPIC_BASE_URL=https://api.deepseek.com
+ANTHROPIC_MODEL=deepseek-v4-flash
+```
+6. 在 agent 端的 `fetch_video.py` 文件中，找到第 150 行 （带 FIXME 注解），填入自己的json爬取目标路径。
+7. 运行 `Application.java, fetch_video.py, web_server.py`文件，分别是java后端、视频扒取服务、agent后端。
+8. 在根目录下找到 `schema.sql` ，使用 mysql 进行建表。
+9. 启动 redis mysql 服务，
+10. 正常运行。
 ---
 
 ## 优先级说明
