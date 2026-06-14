@@ -6,11 +6,8 @@ import com.example.backend.common.BaseContext;
 import com.example.backend.common.BilibiliUrlUtils;
 import com.example.backend.common.RedisLockUtil;
 import com.example.backend.dto.ChatDTO;
+import com.example.backend.entity.*;
 import com.example.backend.dto.SummaryDTO;
-import com.example.backend.entity.Conversation;
-import com.example.backend.entity.Message;
-import com.example.backend.entity.Subtitle;
-import com.example.backend.entity.Video;
 import com.example.backend.mapper.ConversationMapper;
 import com.example.backend.mapper.MessageMapper;
 import com.example.backend.mapper.SubtitleMapper;
@@ -19,9 +16,14 @@ import com.example.backend.service.AgentService;
 import com.example.backend.vo.ChatResult;
 import com.example.backend.vo.SummaryResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rabbitmq.client.Channel;
 import io.netty.channel.ChannelOption;
+import io.swagger.v3.oas.annotations.headers.Header;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -36,12 +38,11 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.netty.http.client.HttpClient;
 
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -55,6 +56,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private SubtitleMapper subtitleMapper;
     @Autowired
     private ConversationMapper conversationMapper;
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
 
     @Value("${agent.service.url:http://localhost:8765}")
     private String agentServiceUrl;
@@ -63,8 +66,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // 用于存储前端建立的 SSE 长连接，处理完成后通过该连接推送结果
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
-    // 虚拟线程池，max为10000，在配置文件中改
-    private final ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
 
     @Autowired
     private StringRedisTemplate redisTemplate;
@@ -234,9 +236,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 redisTemplate.opsForValue().set(redisKey, videoId.toString(),
                     Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
-                // 交给虚拟线程处理，释放tomcat线程
-                virtualExecutor.submit(() ->
-                    doProcess(videoId, baseUrl, part, userId, cookie, sid));
+                ParseTask task = new ParseTask();
+                task.setVideoId(videoId);
+                task.setSid(sid);
+                task.setCookie(cookie);
+                task.setPart(part);
+                task.setBaseUrl(baseUrl);
+                task.setUserId(userId);
+                rabbitTemplate.convertAndSend("videomind.parse.exchange", "parse", task);
 
                 SummaryResult res = new SummaryResult();
                 res.setVideoId(videoId);
@@ -724,7 +731,13 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 conversationId + ":" + userMsg.getId(),
                 Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
-        virtualExecutor.submit(() -> doChatProcess(sid, conversationId, userId, message));
+        // 放入消息队列
+        ChatTask task = new ChatTask();
+        task.setSid(sid);
+        task.setConversationId(conversationId);
+        task.setUserId(userId);
+        task.setMessage(message);
+        rabbitTemplate.convertAndSend("videomind.chat.exchange", "chat", task);
 
         ChatResult res = new ChatResult();
         res.setSessionId(sid);
@@ -910,4 +923,49 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             cleanChatSid(sid);
         }
     }
+
+    // RabbitMQ consumer，使用虚拟线程
+    @RabbitListener(queues = "videomind.parse.queue", ackMode = "MANUAL")
+    public void onParseTask(ParseTask task,
+                            org.springframework.amqp.core.Message amqpMessage,
+                            Channel channel) {
+        long tag = amqpMessage.getMessageProperties().getDeliveryTag();
+        try {
+            // 下面两次查库均是为了保证幂等性
+            Video video = videoMapper.selectById(task.getVideoId());
+            if (video != null && video.getStatus() == 1) {
+                channel.basicAck(tag, false);
+                return;
+            }
+
+            doProcess(task.getVideoId(), task.getBaseUrl(), task.getPart(),
+                task.getUserId(), task.getCookie(), task.getSid());
+
+            video = videoMapper.selectById(task.getVideoId());
+            if (video != null && video.getStatus() == 1) {
+                channel.basicAck(tag, false);
+            } else {
+                channel.basicNack(tag, false, true);
+            }
+        } catch (Exception e) {
+            log.error("MQ 解析任务失败", e);
+            try { channel.basicNack(tag, false, true); } catch (IOException ex) {}
+        }
+    }
+
+    @RabbitListener(queues = "videomind.chat.queue", ackMode = "MANUAL")
+    public void onChatTask(ChatTask task,
+                           org.springframework.amqp.core.Message amqpMessage,
+                           Channel channel) {
+        long tag = amqpMessage.getMessageProperties().getDeliveryTag();
+        try {
+            doChatProcess(task.getSid(), task.getConversationId(),
+                task.getUserId(), task.getMessage());
+            channel.basicAck(tag, false);
+        } catch (Exception e) {
+            log.error("MQ 对话任务失败", e);
+            try { channel.basicNack(tag, false, true); } catch (IOException ex) {}
+        }
+    }
+
 }
