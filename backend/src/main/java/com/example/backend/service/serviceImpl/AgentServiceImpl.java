@@ -19,31 +19,26 @@ import com.example.backend.service.AgentService;
 import com.example.backend.vo.ChatResult;
 import com.example.backend.vo.SummaryResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.netty.channel.ChannelOption;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.netty.http.client.HttpClient;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -92,6 +87,20 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private static final long LOCK_WAIT_RETRY_MS = 500;
     private static final int LOCK_MAX_RETRY = 6;
     private static final String REDIS_USER_LIMIT = "videomind:limit:";
+
+    private WebClient agentWebClient;
+
+    @PostConstruct
+    public void init() {
+        this.agentWebClient = WebClient.builder().baseUrl(agentServiceUrl)
+            .clientConnector(new ReactorClientHttpConnector(
+                HttpClient.create()
+                    .responseTimeout(Duration.ofMinutes(5))
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
+            ))
+            .build();
+    }
+
     /**
      * 提交总结任务（同步入口）
      * 1. 检查数据库缓存（已完成的直接返回）
@@ -543,55 +552,41 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             processReq.put("segments", segments);
             processReq.put("user_id", String.valueOf(userId));
 
-            // 使用 HttpURLConnection 直接发送，强制固定长度模式，避免 chunked 编码
-            ObjectMapper mapper = new ObjectMapper();
-            byte[] bodyBytes = mapper.writeValueAsBytes(processReq);
-
-            URL agentUrl = new URL(agentServiceUrl + "/api/process/stream");
-            HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            conn.setDoOutput(true);
-            conn.setDoInput(true);
-            conn.setFixedLengthStreamingMode(bodyBytes.length);
-            conn.setConnectTimeout(10000);
-            // 5分钟超时
-            conn.setReadTimeout(300000);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(bodyBytes);
-                os.flush();
-            }
-
-            int responseCode = conn.getResponseCode();
-            InputStream stream = (responseCode < 400)
-                ? conn.getInputStream()
-                : conn.getErrorStream();
-
-            // 逐行读取 SSE
             StringBuilder summaryBuilder = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(stream, "UTF-8"))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!line.startsWith("data: ")) continue;
-                    String jsonStr = line.substring(6).trim();
-                    if (jsonStr.isEmpty()) continue;
 
-                    Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
+            Iterator<String> iterator = agentWebClient.post()
+                .uri("/api/process/stream")
+                .bodyValue(processReq)
+                .retrieve()
+                .bodyToFlux(String.class)
+                .toStream()
+                .iterator();
+
+            while(iterator.hasNext()){
+                String line = iterator.next();
+                if(line == null || line.isEmpty()){
+                    return;
+                }
+                try {
+                    Map<String,Object> data = new ObjectMapper().readValue(line, Map.class);
                     String type = (String) data.get("type");
 
-                    if ("chunk".equals(type)) {
+                    if("chunk".equals(type)) {
                         String content = (String) data.get("content");
-                        if (content != null) {
-                            summaryBuilder = new StringBuilder(content);
+                        if (content != null){
+                            summaryBuilder.setLength(0);
+                            summaryBuilder.append(content);
                             pushChunk(sid, content);
                         }
-                    } else if ("done".equals(type)) {
-                        break;
-                    } else if ("error".equals(type)) {
+                    }
+                    else if("error".equals(type)){
                         throw new RuntimeException((String) data.get("message"));
                     }
+                    else if("done".equals(type)){
+                        break;
+                    }
+                }catch (Exception e){
+                    log.error("解析 process chunk 失败：", e);
                 }
             }
 
@@ -649,8 +644,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     private void pushChunk(String sid, String chunk) {
         SseEmitter emitter = emitters.get(sid);
-        if (emitter == null) return;
-        try {
+        if (emitter == null) {
+            log.warn("[SSE] pushChunk 失败，sid={} 不在 emitters 池中", sid);
+            return;
+        }        try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("type", "chunk");
             payload.put("content", chunk);
@@ -837,58 +834,42 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             chatReq.put("video_id", agentVideoId);
             chatReq.put("question", message);
 
-            ObjectMapper mapper = new ObjectMapper();
-            byte[] bodyBytes = mapper.writeValueAsBytes(chatReq);
-
-            URL agentUrl = new URL(agentServiceUrl + "/api/chat/stream");
-            HttpURLConnection conn = (HttpURLConnection) agentUrl.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            conn.setDoOutput(true);
-            conn.setDoInput(true);
-            conn.setFixedLengthStreamingMode(bodyBytes.length);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(300000); // 流式需要更长超时，5分钟
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(bodyBytes);
-                os.flush();
-            }
-
-            int responseCode = conn.getResponseCode();
-            InputStream stream = (responseCode < 400)
-                ? conn.getInputStream()
-                : conn.getErrorStream();
-
-            // 逐行读取 Python 的 SSE 流
             StringBuilder answerBuilder = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(stream, "UTF-8"))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!line.startsWith("data: ")) continue;
-                    String jsonStr = line.substring(6).trim();
-                    if (jsonStr.isEmpty()) continue;
 
-                    Map<String, Object> data = mapper.readValue(jsonStr, Map.class);
-                    String type = (String) data.get("type");
+            Iterator<String> iterator = agentWebClient.post()
+                .uri("/api/chat/stream")
+                .bodyValue(chatReq)
+                .retrieve()
+                .bodyToFlux(String.class)
+                .toStream()
+                .iterator();
 
-                    if ("chunk".equals(type)) {
-                        String content = (String) data.get("content");
-                        if (content != null) {
-                            // Python 推的是增量 token，Java 累积
-                            // 但这里 content 已经是累积字符串（Python 端拼接的）
-                            answerBuilder = new StringBuilder(content);
-                            pushChunk(sid, content); // 立刻透传给前端
+            while (iterator.hasNext()){
+                    String line = iterator.next();
+                    if(line == null || line.isEmpty()) {
+                        return;
+                    }
+                    try {
+                        Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
+                        String type = (String) data.get("type");
+                        if("chunk".equals(type)) {
+                            String content = (String) data.get("content");
+                            if(content!= null) {
+                                answerBuilder.setLength(0);
+                                answerBuilder.append(content);
+                                pushChunk(sid, content);
+                            }
                         }
-                    } else if ("done".equals(type)) {
-                        // 流正常结束
-                        break;
-                    } else if ("error".equals(type)) {
-                        throw new RuntimeException((String) data.get("message"));
+                        else if("error".equals(type)) {
+                            throw new RuntimeException((String) data.get("content"));
+                        }
+                        else if("done".equals(type)) {
+                            break;
+                        }
+                    }catch (Exception e) {
+                        log.error("chat process 错误：", e);
                     }
                 }
-            }
 
             String answer = answerBuilder.toString();
 

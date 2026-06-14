@@ -147,7 +147,6 @@ async def fetch_subtitle_body(sub_url: str, cookies: Dict[str, str] = None) -> L
     return body
 
 
-# FIXME :这里用的绝对路径，要改，放的是字幕文件保存的位置
 def save_to_files(
         title: str, bvid: str, results: List[Dict[str, Any]], out_dir: str = r"D:\Projects\subs"
 ):

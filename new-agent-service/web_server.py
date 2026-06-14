@@ -157,6 +157,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
             }, ensure_ascii=False)
             self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
             self.wfile.flush()
+            self.close_connection = True
 
         except Exception as e:
             self._send_sse_error(str(e))
@@ -188,9 +189,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 )
                 agent.build_video_chunks(video_id=video_id, owner_user_id=user_id)
 
-            # ===== 关键修复：强制从 SQLite 加载到内存缓存 =====
             resolved_owner = agent._ensure_video_loaded(video_id, user_id)
-            # =====================================================
 
             # 2. 准备总结（用 resolved_owner，确保内存里有数据）
             transcript = agent.transcript_store.get_transcript(video_id, owner_user_id=resolved_owner)
@@ -217,6 +216,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
             }, ensure_ascii=False)
             self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
             self.wfile.flush()
+            self.close_connection = True
 
         except Exception as e:
             self._send_sse_error(str(e))
