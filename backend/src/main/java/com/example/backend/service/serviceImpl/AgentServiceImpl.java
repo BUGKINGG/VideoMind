@@ -24,6 +24,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
@@ -44,6 +45,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -61,10 +64,12 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Value("${agent.service.url:http://localhost:8765}")
     private String agentServiceUrl;
 
-    // ========== SSE 单机内存连接池 ==========
     // key: sessionId, value: SseEmitter 对象
     // 用于存储前端建立的 SSE 长连接，处理完成后通过该连接推送结果
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
+
+    // 虚拟线程池，max为10000，在配置文件中改
+    private final ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     @Autowired
     private StringRedisTemplate redisTemplate;
@@ -220,8 +225,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 redisTemplate.opsForValue().set(redisKey, videoId.toString(),
                     Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
-                // 异步编程，相当于信使，告诉 doProcess 函数开始工作，任何继续往下走
-                CompletableFuture.runAsync(() ->
+                // 交给虚拟线程处理，释放tomcat线程
+                virtualExecutor.submit(() ->
                     doProcess(videoId, baseUrl, part, userId, cookie, sid));
 
                 SummaryResult res = new SummaryResult();
@@ -433,7 +438,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 写入完数据库后把字幕全部返回给视频解析agent
      * 视频解析agent得到结果再返回java端
      */
-    private void doProcess(Long videoId, String baseUrl, Integer part,
+    @Async
+    protected void doProcess(Long videoId, String baseUrl, Integer part,
         Long userId, String cookie, String sid) {
         try {
             // 给python视频解析服务传递url和cookie
@@ -721,7 +727,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 conversationId + ":" + userMsg.getId(),
                 Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
-        CompletableFuture.runAsync(() -> doChatProcess(sid, conversationId, userId, message));
+        virtualExecutor.submit(() -> doChatProcess(sid, conversationId, userId, message));
 
         ChatResult res = new ChatResult();
         res.setSessionId(sid);
@@ -809,7 +815,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         emitters.remove(sid);
     }
 
-    private void doChatProcess(String sid, Long conversationId, Long userId, String message) {
+    @Async
+    protected void doChatProcess(String sid, Long conversationId, Long userId, String message) {
         try {
             Conversation conversation = conversationMapper.selectById(conversationId);
             Long videoId = conversation.getVideoId();

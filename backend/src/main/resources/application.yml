@@ -34,3 +34,10 @@ spring:
       port: 6379
       database: 0
       timeout: 5000ms
+  threads:
+    virtual:
+      enabled: true
+  server:
+    tomcat:
+      threads:
+        max: 10000
