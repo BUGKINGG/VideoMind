@@ -4,10 +4,14 @@ server:
 jwt:
   secret: Yesterday-LoveWasSuchEasyGameToP
 
+parse:
+  service:
+    url: ${PARSER_SERVICE_URL:http://localhost:8001}
+
 # Python Agent 服务地址
 agent:
   service:
-    url: http://localhost:8765
+    url: ${PARSER_SERVICE_URL:http://localhost:8765}
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml   # 复杂 SQL 的 XML 放哪
@@ -24,13 +28,13 @@ mybatis-plus:
 
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
-    username: root
-    password: 123456
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai}
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
   data:
     redis:
-      host: localhost
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
       port: 6379
       database: 0
       timeout: 5000ms
@@ -42,10 +46,10 @@ spring:
       threads:
         max: 10000
   rabbitmq:
-    host: localhost
+    host: ${SPRING_RABBITMQ_HOST:localhost}
     port: 5672
-    username: guest
-    password: guest
+    username: ${SPRING_RABBITMQ_USERNAME:guest}
+    password: ${SPRING_RABBITMQ_USERNAME:guest}
     listener:
       simple:
         acknowledge-mode: manual #手动ack

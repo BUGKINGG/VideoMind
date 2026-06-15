@@ -1,8 +1,8 @@
-import axios, { Axios } from "axios";
+import axios from "axios";
 import {useUserStore} from "../stores/user.ts";
 
 const request = axios.create({
-    baseURL: import.meta.env.VITE_BASE_URL,
+    baseURL: "/",
     timeout: 5000
 })
 

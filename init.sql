@@ -1,6 +1,6 @@
 -- ==========================================
 -- VideoMind Database Schema
--- 执行方式: 在 MySQL 中运行 source schema.sql;
+-- 执行方式: 在 MySQL 中运行 source init.sql;
 -- ==========================================
 
 CREATE DATABASE IF NOT EXISTS `video_mind` 

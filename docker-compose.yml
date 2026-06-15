@@ -1,0 +1,110 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: vm-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: video_mind
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - vm-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vm-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - vm-net
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: vm-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: 123456
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - vm-net
+
+  video-mind-parser:
+    build: ./video-mind-agent
+    container_name: vm-parser
+    command: python fetch_video.py
+    ports:
+      - "8001:8001"
+    networks:
+      - vm-net
+
+  video-mind-agent:
+    build: ./video-mind-agent
+    container_name: vm-agent
+    command: python web_server.py
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+    ports:
+      - "8765:8765"
+    volumes:
+      - agent_data:/app/data
+    networks:
+      - vm-net
+
+  # ========== Java 后端 ==========
+  video-mind-java:
+    build: ./video-mind-java
+    container_name: vm-java
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:mysql://vm-mysql:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=123456
+      - SPRING_DATA_REDIS_HOST=vm-redis
+      - SPRING_RABBITMQ_HOST=vm-rabbitmq
+      - SPRING_RABBITMQ_USERNAME=admin
+      - SPRING_RABBITMQ_PASSWORD=123456
+      - AGENT_SERVICE_URL=http://vm-agent:8765
+      - PARSER_SERVICE_URL=http://vm-parser:8001
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+      video-mind-parser:
+        condition: service_started
+      video-mind-agent:
+        condition: service_started
+    networks:
+      - vm-net
+
+  # ========== Vue + Nginx 前端 ==========
+  video-mind-web:
+    build: ./video-mind-web
+    container_name: vm-web
+    ports:
+      - "80:80"
+    depends_on:
+      - video-mind-java
+    networks:
+      - vm-net
+
+volumes:
+  mysql_data:
+  agent_data:
+
+networks:
+  vm-net:
+    driver: bridge

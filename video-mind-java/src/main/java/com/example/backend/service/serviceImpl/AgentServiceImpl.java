@@ -59,6 +59,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Autowired
     private RabbitTemplate rabbitTemplate;
 
+    @Value("${parser.service.url:http://localhost:8001}")
+    private String parserServiceUrl;
+
     @Value("${agent.service.url:http://localhost:8765}")
     private String agentServiceUrl;
 
@@ -461,7 +464,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         Long userId, String cookie, String sid) {
         try {
             // 给python视频解析服务传递url和cookie
-            String pythonUrl = "http://localhost:8001/parse";
+            String pythonUrl = parserServiceUrl + "/parse";
 
             if (cookie != null && !cookie.isEmpty() && !cookie.contains("=")) {
                 cookie = "SESSDATA=" + cookie;

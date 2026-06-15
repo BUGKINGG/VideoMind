@@ -1,0 +1,7 @@
+langgraph==1.2.4
+fastapi
+uvicorn[standard]
+requests
+python-multipart
+pydantic
+bilibili-api-python

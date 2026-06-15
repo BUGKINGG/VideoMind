@@ -7,9 +7,9 @@ agent-service/.venv/
 agent-service/.env
 agent-service/data/
 
-new-agent-service/.env
-new-agent-service/.venv/
-new-agent-service/__pycache__/
-new-agent-service/data/
-new-agent-service/app/repositories/data/
+video-mind-agent/.env
+video-mind-agent/.venv/
+video-mind-agent/__pycache__/
+video-mind-agent/data/
+video-mind-agent/app/repositories/data/
 new-agent-service/*.log

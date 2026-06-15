@@ -11,7 +11,7 @@ from app.models import ChatTurn
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 8765
 
 agent = SimpleAgentService()

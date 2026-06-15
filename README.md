@@ -126,7 +126,7 @@ ANTHROPIC_MODEL=deepseek-v4-flash
 ```
 6. 在 agent 端的 `fetch_video.py` 文件中，找到第 150 行 （带 FIXME 注解），填入自己的json爬取目标路径。
 7. 运行 `Application.java, fetch_video.py, web_server.py`文件，分别是java后端、视频扒取服务、agent后端。
-8. 在根目录下找到 `schema.sql` ，使用 mysql 进行建表。
+8. 在根目录下找到 `init.sql` ，使用 mysql 进行建表。
 9. 启动 redis mysql 服务，
 10. 正常运行。
 ---
