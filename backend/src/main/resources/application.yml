@@ -51,3 +51,5 @@ spring:
         acknowledge-mode: manual #手动ack
         concurrency: 5 #同时消费5条
         max-concurrency: 20
+    publisher-confirm-type: correlated
+    publisher-returns: true

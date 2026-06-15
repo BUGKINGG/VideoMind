@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
 import com.example.backend.common.BilibiliUrlUtils;
 import com.example.backend.common.RedisLockUtil;
+import com.example.backend.common.VideoCorrelationData;
 import com.example.backend.dto.ChatDTO;
 import com.example.backend.entity.*;
 import com.example.backend.dto.SummaryDTO;
@@ -18,12 +19,11 @@ import com.example.backend.vo.SummaryResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import io.netty.channel.ChannelOption;
-import io.swagger.v3.oas.annotations.headers.Header;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -236,6 +236,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 redisTemplate.opsForValue().set(redisKey, videoId.toString(),
                     Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
+                // 发送进 rabbitmq
                 ParseTask task = new ParseTask();
                 task.setVideoId(videoId);
                 task.setSid(sid);
@@ -243,7 +244,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 task.setPart(part);
                 task.setBaseUrl(baseUrl);
                 task.setUserId(userId);
-                rabbitTemplate.convertAndSend("videomind.parse.exchange", "parse", task);
+                CorrelationData correlationData = new VideoCorrelationData(sid,videoId);
+                rabbitTemplate.convertAndSend("videomind.parse.exchange", "parse", task, correlationData);
 
                 SummaryResult res = new SummaryResult();
                 res.setVideoId(videoId);
