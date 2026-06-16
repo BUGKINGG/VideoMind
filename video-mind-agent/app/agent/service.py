@@ -1,13 +1,16 @@
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.agent.graph import AgentGraphRunner
+from app.core.config import get_embedding_config
 from app.llm.client import AnthropicLLMClient, LLMClient
 from app.llm.embedding import EmbeddingClient, get_default_embedding_client
 from app.models import ChatTurn, TranscriptChunk, VideoTranscript, TranscriptSegment
 from app.repositories.conversation_repository import SQLiteConversationRepository
-from app.repositories.vector_store import DEFAULT_OWNER_USER_ID, SQLiteVectorStore
+from app.repositories.qdrant_vector_store import QdrantVectorStore
 from app.repositories.video_repository import SQLiteVideoRepository
+from app.constants import DEFAULT_OWNER_USER_ID
 from app.services.video_qa import VideoQA
 from app.services.video_summarizer import VideoSummarizer
 from app.transcripts.store import TranscriptStore
@@ -15,10 +18,14 @@ from app.transcripts.store import TranscriptStore
 
 @dataclass
 class SimpleAgentService:
-    
+
     llm_client: LLMClient = field(default_factory=AnthropicLLMClient.from_env)
     embedding_client: EmbeddingClient = field(default_factory=get_default_embedding_client)
-    vector_store: SQLiteVectorStore = field(default_factory=SQLiteVectorStore)
+    vector_store: QdrantVectorStore = field(default_factory=lambda: QdrantVectorStore(
+        host=os.getenv("QDRANT_HOST", "localhost"),
+        port=int(os.getenv("QDRANT_PORT", "6333")),
+        vector_size=get_embedding_config().dimensions or 4096,
+    ))
     video_repository: SQLiteVideoRepository = field(default_factory=SQLiteVideoRepository)
     conversation_repository: SQLiteConversationRepository = field(
         default_factory=SQLiteConversationRepository
@@ -240,24 +247,31 @@ class SimpleAgentService:
         limit: int = 3,
         transcript_owner_user_id: str | None = None,
     ) -> list[TranscriptChunk]:
-        query_vector = self.embedding_client.embed(question)
-        search_results = self.vector_store.search(
-            query_vector=query_vector,
-            owner_user_id=user_id,
-            video_id=video_id,
-            limit=limit,
-        )
+        print(f"[DEBUG] find_relevant_video_chunks: user_id={user_id}, video_id={video_id}, question={question[:30]}")
+        try:
+            query_vector = self.embedding_client.embed(question)
+            search_results = None
 
-        if not search_results:
-            search_results = self.vector_store.search(
-                query_vector=query_vector,
-                owner_user_id=DEFAULT_OWNER_USER_ID,
-                video_id=video_id,
-                limit=limit,
-            )
+            for owner in (user_id, DEFAULT_OWNER_USER_ID, None):
+                try:
+                    results = self.vector_store.search(
+                        query_vector=query_vector,
+                        owner_user_id=owner,
+                        video_id=video_id,
+                        limit=limit,
+                    )
+                    print(f"[DEBUG] Qdrant search owner={owner!r} returned {len(results)} results")
+                    if results:
+                        search_results = results
+                        break
+                except Exception as error:
+                    print(f"[WARN] Qdrant search owner={owner!r} failed: {error}")
+                    continue
 
-        if search_results:
-            return [result.chunk for result in search_results]
+            if search_results:
+                return [result.chunk for result in search_results]
+        except Exception as error:
+            print(f"[WARN] embedding 或 Qdrant 检索失败，回退到 SQLite keyword 搜索: {error}")
 
         return self.transcript_store.find_relevant_chunks(
             video_id=video_id,

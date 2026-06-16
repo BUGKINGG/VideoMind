@@ -334,6 +334,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         String redisKey = REDIS_SSE_SUMMARY_PREFIX + sid;
         redisTemplate.opsForValue().set(redisKey, processing.getId().toString(),
             Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
+        // 加入等待队列
+        redisTemplate.opsForSet().add("videomind:waiting:" + processing.getId(), sid);
 
         SummaryResult res = new SummaryResult();
         res.setVideoId(processing.getId());
@@ -425,7 +427,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         emitters.put(sid, emitter);
 
         // 连接关闭/超时/报错时，必须从内存移除，防止内存泄漏
-        emitter.onCompletion(() -> cleanSid(sid));
+        emitter.onCompletion(() -> {
+            cleanSid(sid);
+            redisTemplate.opsForSet().remove("videomind:waiting:" + videoId, sid);
+        });
         emitter.onTimeout(() -> cleanSid(sid));
         emitter.onError((e) -> cleanSid(sid));
 
@@ -577,18 +582,17 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             while(iterator.hasNext()){
                 String line = iterator.next();
                 if(line == null || line.isEmpty()){
-                    return;
+                    continue;
                 }
                 try {
                     Map<String,Object> data = new ObjectMapper().readValue(line, Map.class);
                     String type = (String) data.get("type");
 
                     if("chunk".equals(type)) {
-                        String content = (String) data.get("content");
-                        if (content != null){
-                            summaryBuilder.setLength(0);
-                            summaryBuilder.append(content);
-                            pushChunk(sid, content);
+                        String token = (String) data.get("content");
+                        if (token != null){
+                            summaryBuilder.append(token);
+                            pushChunk(sid, token);
                         }
                     }
                     else if("error".equals(type)){
@@ -598,7 +602,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         break;
                     }
                 }catch (Exception e){
-                    log.error("解析 process chunk 失败：", e);
+                    log.error("解析 process chunk 失败，跳过该行: {}", line, e);
+                    continue;
                 }
             }
 
@@ -635,6 +640,20 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             // 最后推送完成事件，携带完整数据
             pushDone(sid, videoId, conversationId, title, summary, count);
+            // 推送给等待队列
+            Set<String> waitingSids = redisTemplate.opsForSet()
+                .members("videomind:waiting:" + videoId);
+
+
+            if (waitingSids != null) {
+                for (String waitSid : waitingSids) {
+                    // 避免重复推给原始 sid
+                    if (!waitSid.equals(sid)) {
+                        pushDone(waitSid, videoId, conversationId, title, summary, count);
+                    }
+                }
+                redisTemplate.delete("videomind:waiting:" + videoId);
+            }
 
         } catch (Exception e) {
             // 标记失败，避免前端无限等待
@@ -842,7 +861,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 .get(REDIS_VIDEO_AGENT_PREFIX + videoId.toString());
             if (agentVideoId == null) {
                 String bvid = BilibiliUrlUtils.extractBvid(video.getUrl());
-                agentVideoId = bvid + "_p" + video.getPart();
+                if (bvid == null) {
+                    bvid = "video";
+                }
+                Integer part = video.getPart();
+                agentVideoId = bvid + "_p" + (part != null ? part : 1);
             }
 
             // 调用 Python /api/chat/stream（流式接口）
@@ -851,6 +874,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             chatReq.put("session_id", conversationId.toString());
             chatReq.put("video_id", agentVideoId);
             chatReq.put("question", message);
+
+            log.info("[Chat] 调用 agent chat: videoId={}, agentVideoId={}, userId={}, chatReq={}",
+                videoId, agentVideoId, userId, chatReq);
 
             StringBuilder answerBuilder = new StringBuilder();
 
@@ -865,27 +891,27 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             while (iterator.hasNext()){
                     String line = iterator.next();
                     if(line == null || line.isEmpty()) {
-                        return;
+                        continue;
                     }
                     try {
                         Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
                         String type = (String) data.get("type");
                         if("chunk".equals(type)) {
-                            String content = (String) data.get("content");
-                            if(content!= null) {
-                                answerBuilder.setLength(0);
-                                answerBuilder.append(content);
-                                pushChunk(sid, content);
+                            String token = (String) data.get("content");
+                            if(token!= null) {
+                                answerBuilder.append(token);
+                                pushChunk(sid, token);
                             }
                         }
                         else if("error".equals(type)) {
-                            throw new RuntimeException((String) data.get("content"));
+                            throw new RuntimeException((String) data.get("message"));
                         }
                         else if("done".equals(type)) {
                             break;
                         }
                     }catch (Exception e) {
-                        log.error("chat process 错误：", e);
+                        log.error("chat process JSON 解析失败，跳过该行: {}", line, e);
+                        continue;
                     }
                 }
 
@@ -936,24 +962,48 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                             Channel channel) {
         long tag = amqpMessage.getMessageProperties().getDeliveryTag();
         try {
-            // 下面两次查库均是为了保证幂等性
             Video video = videoMapper.selectById(task.getVideoId());
+
+            // 1. 幂等：已经完成的，直接 ACK 丢弃
             if (video != null && video.getStatus() == 1) {
+                log.info("[MQ] 视频已处理完成，幂等跳过: videoId={}", task.getVideoId());
                 channel.basicAck(tag, false);
-                return;
+                return;  // ← 直接返回，不执行 doProcess
             }
 
+            // 2. 已经明确失败的，ACK 丢弃，不再重试
+            if (video != null && video.getStatus() == 2) {
+                log.error("[MQ] 视频处理已失败，丢弃消息不再重试: videoId={}", task.getVideoId());
+                channel.basicAck(tag, false);
+                return;  // ← 直接返回，不执行 doProcess
+            }
+
+            // 3. 只有 status=0 或 video 不存在时，才执行 doProcess
             doProcess(task.getVideoId(), task.getBaseUrl(), task.getPart(),
                 task.getUserId(), task.getCookie(), task.getSid());
 
+            // 4. doProcess 结束后检查状态
             video = videoMapper.selectById(task.getVideoId());
             if (video != null && video.getStatus() == 1) {
                 channel.basicAck(tag, false);
+            } else if (video != null && video.getStatus() == 2) {
+                log.error("[MQ] doProcess 返回失败，丢弃消息: videoId={}", task.getVideoId());
+                channel.basicAck(tag, false);  // 失败也 ACK，不无限重试
             } else {
+                // status 还是 0，doProcess 可能异常退出但没走到 catch
                 channel.basicNack(tag, false, true);
             }
         } catch (Exception e) {
-            log.error("MQ 解析任务失败", e);
+            log.error("MQ 解析任务异常, videoId={}", task.getVideoId(), e);
+            // 异常后查状态，如果已标记失败则 ACK
+            try {
+                Video video = videoMapper.selectById(task.getVideoId());
+                if (video != null && video.getStatus() == 2) {
+                    channel.basicAck(tag, false);
+                    return;
+                }
+            } catch (Exception ex) {}
+            // 否则重试一次
             try { channel.basicNack(tag, false, true); } catch (IOException ex) {}
         }
     }

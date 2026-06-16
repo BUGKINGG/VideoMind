@@ -5,3 +5,4 @@ requests
 python-multipart
 pydantic
 bilibili-api-python
+qdrant-client>=1.9.0

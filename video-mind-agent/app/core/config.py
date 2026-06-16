@@ -35,6 +35,7 @@ class EmbeddingConfig:
     api_key: str | None
     base_url: str | None
     model: str | None
+    dimensions: int | None = None
 
 
 def get_llm_config() -> LLMConfig:
@@ -48,10 +49,12 @@ def get_llm_config() -> LLMConfig:
 
 def get_embedding_config() -> EmbeddingConfig:
     load_local_env()
+    raw_dimensions = os.getenv("EMBEDDING_DIMENSIONS")
     return EmbeddingConfig(
         api_key=os.getenv("EMBEDDING_API_KEY"),
         base_url=os.getenv("EMBEDDING_BASE_URL"),
         model=os.getenv("EMBEDDING_MODEL"),
+        dimensions=int(raw_dimensions) if raw_dimensions else None,
     )
 
 

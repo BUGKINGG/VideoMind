@@ -106,7 +106,9 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
         try:
             # 加载上下文
+            print(f"[DEBUG] /api/chat/stream received: user_id={user_id}, session_id={session_id}, video_id={video_id}, question={question[:30]}")
             resolved_owner = agent._ensure_video_loaded(video_id, user_id)
+            print(f"[DEBUG] resolved_owner={resolved_owner}")
             transcript = agent.transcript_store.get_transcript(video_id, resolved_owner)
             chunks = agent.find_relevant_video_chunks(
                 user_id=user_id,
@@ -114,6 +116,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 question=question,
                 transcript_owner_user_id=resolved_owner,
             )
+            print(f"[DEBUG] retrieved {len(chunks)} chunks")
             history = agent._get_or_load_history(
                 f"{user_id}:{session_id}:{video_id}",
                 user_id=user_id,
@@ -127,7 +130,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 full_answer.append(token)
                 payload = json.dumps({
                     "type": "chunk",
-                    "content": "".join(full_answer),
+                    "content": token,
                 }, ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
@@ -201,7 +204,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 full_summary.append(token)
                 payload = json.dumps({
                     "type": "chunk",
-                    "content": "".join(full_summary),
+                    "content": token,
                 }, ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()

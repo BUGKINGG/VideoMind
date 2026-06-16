@@ -389,14 +389,17 @@ function processSseChunk(chunk) {
         messages.value[placeholderIndex] = {
           role: 'ai',
           // 流式阶段用纯文本，避免 markdown 解析不完整
-          content: data.content,
+          content: renderMarkdown(data.content),
+          rawContent: data.content,
           isStreaming: true
         }
       } else {
         // 更新正在流式的消息
         const idx = messages.value.findIndex(m => m.isStreaming)
         if (idx !== -1) {
-          messages.value[idx].content = renderMarkdown(data.content)
+          const raw = messages.value[idx].rawContent + data.content
+          messages.value[idx].rawContent = raw
+          messages.value[idx].content = renderMarkdown(raw)
         }
       }
       scrollToBottom()
@@ -409,9 +412,10 @@ function processSseChunk(chunk) {
       currentVideoId.value = data.videoId || null
       const idx = messages.value.findIndex(m => m.isStreaming)
       if (idx !== -1) {
+        const raw = messages.value[idx].rawContent || ''
         messages.value[idx] = {
           role: 'ai',
-          content: renderMarkdown(data.summary || '')
+          content: renderMarkdown(raw)
         }
       }
       isLoading.value = false
@@ -723,20 +727,35 @@ function processChatChunk(chunk, aiIndex) {
     console.log('[Chat SSE]', eventName, data)  // 调试用，确认收到数据
 
     if (eventName === 'message' && data.type === 'chunk') {
-      // 用 splice 强制触发 Vue 响应式，保留同一 AI 消息的 id
-      messages.value.splice(aiIndex, 1, {
-        id: messages.value[aiIndex]?.id,
-        role: 'ai',
-        content: renderMarkdown(data.content || ''),
-        isStreaming: true
-      })
+      const current = messages.value[aiIndex]
+      if (current.content === '思考中...') {
+        // 第一个 token
+        messages.value.splice(aiIndex, 1, {
+          id: current.id,
+          role: 'ai',
+          content: renderMarkdown(data.content),
+          rawContent: data.content,
+          isStreaming: true
+        })
+      } else {
+        const raw = (current.rawContent || '') + data.content
+        messages.value.splice(aiIndex, 1, {
+          id: current.id,
+          role: 'ai',
+          content: renderMarkdown(raw),
+          rawContent: raw,
+          isStreaming: true
+        })
+      }
       scrollToBottom()
     }
     else if (eventName === 'message' && data.type === 'done') {
+      const current = messages.value[aiIndex]
+      const raw = current.rawContent || ''
       messages.value.splice(aiIndex, 1, {
-        id: messages.value[aiIndex]?.id,
+        id: current.id,
         role: 'ai',
-        content: renderMarkdown(data.answer || data.content || '')
+        content: renderMarkdown(data.answer || raw)
       })
       loadHistory()
     }

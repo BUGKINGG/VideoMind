@@ -71,31 +71,39 @@ class OpenAICompatibleEmbeddingClient(EmbeddingClient):
             )
 
         url = self.config.base_url.rstrip("/") + "/v1/embeddings"
-        payload = {
-            "model": self.config.model,
-            "input": texts,
-        }
-        request = urllib.request.Request(
-            url=url,
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.config.api_key}",
-            },
-        )
+        vectors = []
 
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Embedding API returned HTTP {error.code}: {detail}") from error
-        except urllib.error.URLError as error:
-            raise RuntimeError("Cannot connect to the embedding API.") from error
+        for text in texts:
+            payload: dict = {
+                "input": text,
+                "model": self.config.model,
+                "encoding_format": "float",
+            }
+            if self.config.dimensions:
+                payload["dimensions"] = self.config.dimensions
 
-        items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
-        vectors = [item["embedding"] for item in items if "embedding" in item]
+            request = urllib.request.Request(
+                url=url,
+                data=json.dumps(payload).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.config.api_key}",
+                },
+            )
+
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"Embedding API returned HTTP {error.code}: {detail}") from error
+            except urllib.error.URLError as error:
+                raise RuntimeError("Cannot connect to the embedding API.") from error
+
+            vec = data["data"][0]["embedding"]
+            vectors.append(vec)
+
         if len(vectors) != len(texts):
             raise RuntimeError("Embedding API returned an unexpected number of vectors.")
         return vectors
@@ -118,9 +126,14 @@ class FallbackEmbeddingClient(EmbeddingClient):
 
 def get_default_embedding_client() -> EmbeddingClient:
     config = get_embedding_config()
-    if config.api_key and config.base_url and config.model:
-        return FallbackEmbeddingClient(
-            primary=OpenAICompatibleEmbeddingClient(config=config),
-            fallback=HashEmbeddingClient(),
+
+    # 强制使用真实 Embedding API，不配就报错，绝不静默回退到 Hash
+    if not config.api_key or not config.base_url or not config.model:
+        raise RuntimeError(
+            "Embedding API 未配置。请在 .env 中设置：\n"
+            "EMBEDDING_API_KEY=sk-xxx\n"
+            "EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1\n"
+            "EMBEDDING_MODEL=BAAI/bge-m3"
         )
-    return HashEmbeddingClient()
+
+    return OpenAICompatibleEmbeddingClient(config=config)

@@ -11,7 +11,7 @@ parse:
 # Python Agent 服务地址
 agent:
   service:
-    url: ${PARSER_SERVICE_URL:http://localhost:8765}
+    url: ${AGENT_SERVICE_URL:http://localhost:8765}
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml   # 复杂 SQL 的 XML 放哪
@@ -48,8 +48,8 @@ spring:
   rabbitmq:
     host: ${SPRING_RABBITMQ_HOST:localhost}
     port: 5672
-    username: ${SPRING_RABBITMQ_USERNAME:guest}
-    password: ${SPRING_RABBITMQ_USERNAME:guest}
+    username: ${SPRING_RABBITMQ_USERNAME:admin}
+    password: ${SPRING_RABBITMQ_USERNAME:123456}
     listener:
       simple:
         acknowledge-mode: manual #手动ack

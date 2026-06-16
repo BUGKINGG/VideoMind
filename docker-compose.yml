@@ -38,6 +38,16 @@ services:
     networks:
       - vm-net
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: vm-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - vm-net
+
   video-mind-parser:
     build: ./video-mind-agent
     container_name: vm-parser
@@ -53,6 +63,15 @@ services:
     command: python web_server.py
     environment:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-4096}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
     ports:
       - "8765:8765"
     volumes:
@@ -104,6 +123,7 @@ services:
 volumes:
   mysql_data:
   agent_data:
+  qdrant_data:
 
 networks:
   vm-net:
