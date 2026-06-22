@@ -13,10 +13,11 @@ services:
     networks:
       - vm-net
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD", "mysql", "-uroot", "-p123456", "-e", "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'nacos';"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -82,7 +83,6 @@ services:
   # ========== Java 后端 ==========
   video-mind-java:
     build: ./video-mind-java
-    container_name: vm-java
     environment:
       - SPRING_DATASOURCE_URL=jdbc:mysql://vm-mysql:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
       - SPRING_DATASOURCE_USERNAME=root
@@ -93,9 +93,10 @@ services:
       - SPRING_RABBITMQ_PASSWORD=123456
       - AGENT_SERVICE_URL=http://vm-agent:8765
       - PARSER_SERVICE_URL=http://vm-parser:8001
-    ports:
-      - "8080:8080"
+      - NACOS_SERVER=vm-nacos:8848
     depends_on:
+      nacos:
+        condition: service_healthy
       mysql:
         condition: service_healthy
       redis:
@@ -106,6 +107,34 @@ services:
         condition: service_started
       video-mind-agent:
         condition: service_started
+    networks:
+      - vm-net
+
+  nacos:
+    image: nacos/nacos-server:v2.3.0
+    container_name: vm-nacos
+    environment:
+      - MODE=standalone
+      - SPRING_DATASOURCE_PLATFORM=mysql
+      - MYSQL_SERVICE_HOST=vm-mysql
+      - MYSQL_SERVICE_DB_NAME=nacos
+      - MYSQL_SERVICE_PORT=3306
+      - MYSQL_SERVICE_USER=root
+      - MYSQL_SERVICE_PASSWORD=123456
+      - MYSQL_SERVICE_DB_PARAM=allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=Asia/Shanghai
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/index.html"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
     networks:
       - vm-net
 

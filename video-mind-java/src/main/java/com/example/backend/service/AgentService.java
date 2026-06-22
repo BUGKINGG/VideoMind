@@ -17,4 +17,10 @@ public interface AgentService extends IService<Video> {
     ChatResult submitChat(ChatDTO chatDTO);
 
     SseEmitter connectChatSse(String sid);
+
+    void pushChunkInternal(String sid, String token);
+
+    void pushDoneInternal(String sid, Long videoId, Long conversationId, String title, String summary, int count);
+
+    void pushErrorInternal(String sid, String message);
 }

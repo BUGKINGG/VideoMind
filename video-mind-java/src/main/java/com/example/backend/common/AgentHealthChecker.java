@@ -38,7 +38,7 @@ public class AgentHealthChecker {
                 .uri("/api/health")
                 .retrieve()
                 .onStatus(HttpStatusCode::isError, resp -> {
-                    Mono.error(new RuntimeException("Agent返回非200"));
+                    return Mono.error(new RuntimeException("Agent返回非200"));
                 })
                 .bodyToMono(String.class)
                 .timeout(TIMEOUT)

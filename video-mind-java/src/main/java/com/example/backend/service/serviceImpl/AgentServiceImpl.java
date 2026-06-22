@@ -24,10 +24,11 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.ServiceInstance;
+import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
@@ -37,6 +38,7 @@ import reactor.netty.http.client.HttpClient;
 
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -58,12 +60,23 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private RabbitTemplate rabbitTemplate;
     @Autowired
     private AgentHealthChecker healthChecker;
+    @Autowired
+    private DiscoveryClient discoveryClient;
+
+    @Value("${spring.cloud.nacos.discovery.instance-id}")
+    private String instanceId;
+
+    // 实例间传递消息调用
+    private WebClient instanceWebClient;
 
     @Value("${parser.service.url:http://localhost:8001}")
     private String parserServiceUrl;
 
     @Value("${agent.service.url:http://localhost:8765}")
     private String agentServiceUrl;
+
+    @Value("${server.port}")
+    private int serverPort;
 
     // key: sessionId, value: SseEmitter 对象
     // 用于存储前端建立的 SSE 长连接，处理完成后通过该连接推送结果
@@ -104,6 +117,25 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                     .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
             ))
             .build();
+
+        // 实例间调用 webclient
+        this.instanceWebClient = WebClient.builder()
+            .clientConnector(new ReactorClientHttpConnector(
+                HttpClient.create()
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
+                    .responseTimeout(Duration.ofSeconds(10))
+            ))
+            .build();
+
+        // 启动后延迟 5 秒，等 Nacos 注册完成，然后查自己的真实 instanceId
+        new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                refreshSelfInstanceId();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
     }
 
     /**
@@ -426,6 +458,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         SseEmitter emitter = new SseEmitter(300_000L);
         emitters.put(sid, emitter);
 
+        // 将该实例注册进redis中
+        registerSseOwner(sid);
+
         // 连接关闭/超时/报错时，必须从内存移除，防止内存泄漏
         emitter.onCompletion(() -> {
             cleanSid(sid);
@@ -452,6 +487,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     private void cleanSid(String sid) {
         emitters.remove(sid);
+        redisTemplate.delete("videomind:sse:owner:" + sid);
     }
 
     /**
@@ -464,7 +500,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 写入完数据库后把字幕全部返回给视频解析agent
      * 视频解析agent得到结果再返回java端
      */
-    @Async
     protected void doProcess(Long videoId, String baseUrl, Integer part,
         Long userId, String cookie, String sid) {
         if(!healthChecker.isHealthy()){
@@ -688,20 +723,47 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 前端收到后实时更新 AI 消息内容
      */
     private void pushChunk(String sid, String chunk) {
+        // 1. 本地优先
         SseEmitter emitter = emitters.get(sid);
-        if (emitter == null) {
-            log.warn("[SSE] pushChunk 失败，sid={} 不在 emitters 池中", sid);
+        if (emitter != null) {
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "chunk");
+                payload.put("content", chunk);
+                String json = new ObjectMapper().writeValueAsString(payload);
+                emitter.send(SseEmitter.event().name("message").data(json));
+            } catch (Exception e) {
+                log.warn("SSE chunk 推送失败, sid={}", sid);
+                cleanSid(sid);
+            }
             return;
-        }        try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("type", "chunk");
-            payload.put("content", chunk);
-            String json = new ObjectMapper().writeValueAsString(payload);
-            emitter.send(SseEmitter.event().name("message").data(json));
-        } catch (Exception e) {
-            log.warn("SSE chunk 推送失败, sid={}", sid);
-            cleanSid(sid);
         }
+        // 2. 本地没有，查 Redis 找目标实例
+        String targetInstanceId = redisTemplate.opsForValue()
+            .get("videomind:sse:owner:" + sid);
+        if (targetInstanceId == null) {
+            log.warn("[PushChunk] sid={} 无本地 emitter，且 Redis 无映射，丢弃", sid);
+            return;
+        }
+
+        // 3. 通过 Nacos 查目标实例是否存活
+        ServiceInstance target = findInstance(targetInstanceId);
+        if (target == null) {
+            log.warn("[PushChunk] sid={} 的目标实例 {} 已下线，清理脏数据", sid, targetInstanceId);
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
+
+        // 4. 异步 HTTP POST 转发，不阻塞 LLM 消费线程
+        String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
+        instanceWebClient.post()
+            .uri(targetUrl + "/internal/sse/push")
+            .bodyValue(Map.of("sid", sid, "type", "chunk", "token", chunk))
+            .retrieve()
+            .toBodilessEntity()
+            .timeout(Duration.ofSeconds(5))
+            .doOnError(e -> log.error("[PushChunk] 转发 chunk 到 {} 失败, sid={}", targetUrl, sid, e))
+            .subscribe();
     }
 
     /**
@@ -710,21 +772,51 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     private void pushDone(String sid, Long videoId, Long conversationId, String title, String summary, int count) {
         SseEmitter emitter = emitters.get(sid);
-        if (emitter == null) return;
+        if (emitter != null) {
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "done");
+                payload.put("videoId", videoId);
+                payload.put("conversationId", conversationId);
+                payload.put("title", title);
+                payload.put("summary", summary);
+                payload.put("subtitleCount", count);
+                String json = new ObjectMapper().writeValueAsString(payload);
+                emitter.send(SseEmitter.event().name("message").data(json));
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("SSE done 推送失败, sid={}", sid);
+                cleanSid(sid);
+            }
+            return;
+        }
+
+        // 远程转发
+        String targetInstanceId = redisTemplate.opsForValue()
+            .get("videomind:sse:owner:" + sid);
+        if (targetInstanceId == null) return;
+
+        ServiceInstance target = findInstance(targetInstanceId);
+        if (target == null) {
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
+
+        String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
         try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("type", "done");
-            payload.put("videoId", videoId);
-            payload.put("conversationId", conversationId);
-            payload.put("title", title);
-            payload.put("summary", summary);
-            payload.put("subtitleCount", count);
-            String json = new ObjectMapper().writeValueAsString(payload);
-            emitter.send(SseEmitter.event().name("message").data(json));
-            emitter.complete();
+            instanceWebClient.post()
+                .uri(targetUrl + "/internal/sse/push")
+                .bodyValue(Map.of(
+                    "sid", sid, "type", "done",
+                    "videoId", videoId, "conversationId", conversationId,
+                    "title", title, "summary", summary, "subtitleCount", count
+                ))
+                .retrieve()
+                .toBodilessEntity()
+                .timeout(Duration.ofSeconds(5))
+                .block(); // 终态同步等待
         } catch (Exception e) {
-            log.error("SSE done 推送失败, sid={}", sid);
-            cleanSid(sid);
+            log.error("[PushDone] 转发 done 到 {} 失败, sid={}", targetUrl, sid, e);
         }
     }
 
@@ -733,17 +825,42 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     private void pushError(String sid, String errorMsg) {
         SseEmitter emitter = emitters.get(sid);
-        if (emitter == null) return;
+        if (emitter != null) {
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "error");
+                payload.put("message", errorMsg);
+                String json = new ObjectMapper().writeValueAsString(payload);
+                emitter.send(SseEmitter.event().name("error").data(json));
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("SSE error 推送失败, sid={}", sid);
+                cleanSid(sid);
+            }
+            return;
+        }
+
+        String targetInstanceId = redisTemplate.opsForValue()
+            .get("videomind:sse:owner:" + sid);
+        if (targetInstanceId == null) return;
+
+        ServiceInstance target = findInstance(targetInstanceId);
+        if (target == null) {
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
+
+        String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
         try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("type", "error");
-            payload.put("message", errorMsg);
-            String json = new ObjectMapper().writeValueAsString(payload);
-            emitter.send(SseEmitter.event().name("error").data(json));
-            emitter.complete();
+            instanceWebClient.post()
+                .uri(targetUrl + "/internal/sse/push")
+                .bodyValue(Map.of("sid", sid, "type", "error", "message", errorMsg))
+                .retrieve()
+                .toBodilessEntity()
+                .timeout(Duration.ofSeconds(5))
+                .block();
         } catch (Exception e) {
-            log.error("SSE error 推送失败, sid={}", sid);
-            cleanSid(sid);
+            log.error("[PushError] 转发 error 到 {} 失败, sid={}", targetUrl, sid, e);
         }
     }
 
@@ -845,6 +962,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     SseEmitter emitter = new SseEmitter(120_000L);
     emitters.put(sid, emitter);
 
+    registerSseOwner(sid);
+
     emitter.onCompletion(() -> cleanChatSid(sid));
     emitter.onTimeout(() -> cleanChatSid(sid));
     emitter.onError((e) -> cleanChatSid(sid));
@@ -861,9 +980,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     private void cleanChatSid(String sid) {
         emitters.remove(sid);
+        redisTemplate.delete("videomind:sse:owner:" + sid);
     }
 
-    @Async
     protected void doChatProcess(String sid, Long conversationId, Long userId, String message) {
         // 心跳检活
         if (!healthChecker.isHealthy()) {
@@ -901,7 +1020,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             try {
                 agentWebClient.post()
-                    .uri("/api/process/stream")
+                    .uri("/api/chat/stream")
                     .bodyValue(chatReq)
                     .retrieve()
                     .bodyToFlux(String.class)
@@ -1046,4 +1165,58 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
     }
 
+    private void registerSseOwner(String sid) {
+        redisTemplate.opsForValue().set(
+            "videomind:sse:owner:" + sid,
+            instanceId,
+            Duration.ofMinutes(10)
+        );
+    }
+
+    private ServiceInstance findInstance(String instanceId) {
+        List<ServiceInstance> instances = discoveryClient.getInstances("video-mind-java");
+        if (instances == null || instances.isEmpty()) return null;
+        return instances.stream()
+            .filter(i -> instanceId.equals(i.getInstanceId()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    @Override
+    public void pushChunkInternal(String sid, String token) {
+        pushChunk(sid, token);
+    }
+
+    @Override
+    public void pushDoneInternal(String sid, Long videoId, Long conversationId,
+                                 String title, String summary, int count) {
+        pushDone(sid, videoId, conversationId, title, summary, count);
+    }
+
+    @Override
+    public void pushErrorInternal(String sid, String message) {
+        pushError(sid, message);
+    }
+
+    private void refreshSelfInstanceId() {
+        try {
+            String ip = InetAddress.getLocalHost().getHostAddress();
+            List<ServiceInstance> instances = discoveryClient.getInstances("video-mind-java");
+            if (instances == null || instances.isEmpty()) {
+                log.warn("[Nacos] 无法获取服务实例列表");
+                return;
+            }
+
+            for (ServiceInstance inst : instances) {
+                if (ip.equals(inst.getHost()) && serverPort == inst.getPort()) {
+                    this.instanceId = inst.getInstanceId();
+                    log.info("[Nacos] 对齐成功，selfInstanceId={}", this.instanceId);
+                    return;
+                }
+            }
+            log.warn("[Nacos] 未找到匹配本机({}:{})的实例", ip, serverPort);
+        } catch (Exception e) {
+            log.error("[Nacos] 刷新 instanceId 失败", e);
+        }
+    }
 }
