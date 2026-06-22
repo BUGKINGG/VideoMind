@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -29,8 +30,10 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             if path == "/api/health":
-                self._send_json({"status": "ok"})
-                return
+                try:
+                    self._send_json({"status": "ok"})
+                except:
+                    self._send_json({"status": "error"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
 
             if path == "/api/videos":
                 self._send_json({"videos": agent.video_repository.list_videos()})
@@ -126,6 +129,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
             # 流式生成
             full_answer = []
+            last_ping = time.time()
             for token in agent.video_qa.answer_stream(transcript, question, chunks, history):
                 full_answer.append(token)
                 payload = json.dumps({
@@ -134,6 +138,11 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 }, ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
+
+                if time.time() - last_ping > 10:
+                    self.wfile.write(b":ping\n\n")
+                    self.wfile.flush()
+                    last_ping = time.time()
 
             # 保存对话（流结束后）
             answer = "".join(full_answer)
@@ -200,6 +209,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
             # 3. 流式总结
             full_summary = []
+            last_ping = time.time()
             for token in agent.video_summarizer.summarize_stream(transcript=transcript, chunks=chunks):
                 full_summary.append(token)
                 payload = json.dumps({
@@ -208,6 +218,11 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 }, ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
+
+                if time.time() - last_ping > 10:
+                    self.wfile.write(b":ping\n\n")
+                    self.wfile.flush()
+                    last_ping = time.time()
 
             # 4. 推 done
             summary = "".join(full_summary)

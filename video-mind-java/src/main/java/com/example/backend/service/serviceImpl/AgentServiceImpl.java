@@ -2,9 +2,7 @@ package com.example.backend.service.serviceImpl;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.example.backend.common.BaseContext;
-import com.example.backend.common.BilibiliUrlUtils;
-import com.example.backend.common.RedisLockUtil;
+import com.example.backend.common.*;
 import com.example.backend.common.VideoCorrelationData;
 import com.example.backend.dto.ChatDTO;
 import com.example.backend.entity.*;
@@ -58,6 +56,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private ConversationMapper conversationMapper;
     @Autowired
     private RabbitTemplate rabbitTemplate;
+    @Autowired
+    private AgentHealthChecker healthChecker;
 
     @Value("${parser.service.url:http://localhost:8001}")
     private String parserServiceUrl;
@@ -467,6 +467,17 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Async
     protected void doProcess(Long videoId, String baseUrl, Integer part,
         Long userId, String cookie, String sid) {
+        if(!healthChecker.isHealthy()){
+            log.error("Agent断线，拒绝处理 videoId = {}", videoId);
+            // 直接标记失败，前端立即收到错误
+            Video fail = new Video();
+            fail.setId(videoId);
+            fail.setStatus(2);
+            fail.setSummary("Agent服务不可用");
+            videoMapper.updateById(fail);
+            pushError(sid, "AI服务当前不可用，请稍后重试");
+            return;
+        }
         try {
             // 给python视频解析服务传递url和cookie
             String pythonUrl = parserServiceUrl + "/parse";
@@ -571,40 +582,43 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             StringBuilder summaryBuilder = new StringBuilder();
 
-            Iterator<String> iterator = agentWebClient.post()
-                .uri("/api/process/stream")
-                .bodyValue(processReq)
-                .retrieve()
-                .bodyToFlux(String.class)
-                .toStream()
-                .iterator();
+            try {
+                agentWebClient.post()
+                    .uri("/api/process/stream")
+                    .bodyValue(processReq)
+                    .retrieve()
+                    .bodyToFlux(String.class)
+                    // 关键：30秒内必须收到任何一行（chunk或保活注释），否则认为假死
+                    .timeout(Duration.ofSeconds(30))
+                    .doOnNext(line -> {
+                        if (line == null || line.isEmpty()) return;
+                        // 如果Python加了SSE保活注释，直接忽略
+                        if (line.startsWith(":ping")) return;
 
-            while(iterator.hasNext()){
-                String line = iterator.next();
-                if(line == null || line.isEmpty()){
-                    continue;
-                }
-                try {
-                    Map<String,Object> data = new ObjectMapper().readValue(line, Map.class);
-                    String type = (String) data.get("type");
+                        if (line.isEmpty()) return;
 
-                    if("chunk".equals(type)) {
-                        String token = (String) data.get("content");
-                        if (token != null){
-                            summaryBuilder.append(token);
-                            pushChunk(sid, token);
+                        try {
+                            Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
+                            String type = (String) data.get("type");
+
+                            if ("chunk".equals(type)) {
+                                String token = (String) data.get("content");
+                                if (token != null) {
+                                    summaryBuilder.append(token);
+                                    pushChunk(sid, token);
+                                }
+                            } else if ("error".equals(type)) {
+                                // Agent明确返回业务错误，终止整个流
+                                throw new RuntimeException((String) data.get("message"));
+                            }
+                            // "done" 不需要处理，Flux自然结束
+                        } catch (Exception e) {
+                            log.error("解析 process chunk 失败，跳过: {}", line, e);
                         }
-                    }
-                    else if("error".equals(type)){
-                        throw new RuntimeException((String) data.get("message"));
-                    }
-                    else if("done".equals(type)){
-                        break;
-                    }
-                }catch (Exception e){
-                    log.error("解析 process chunk 失败，跳过该行: {}", line, e);
-                    continue;
-                }
+                    })
+                    .blockLast(Duration.ofMinutes(5));
+            } catch (Exception e) {
+                throw new RuntimeException("Agent流处理失败: " + e.getMessage(), e);
             }
 
             String summary = summaryBuilder.toString();
@@ -851,6 +865,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     @Async
     protected void doChatProcess(String sid, Long conversationId, Long userId, String message) {
+        // 心跳检活
+        if (!healthChecker.isHealthy()) {
+            pushError(sid, "AI服务当前不可用，请稍后重试");
+            return;
+        }
         try {
             Conversation conversation = conversationMapper.selectById(conversationId);
             Long videoId = conversation.getVideoId();
@@ -880,40 +899,44 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             StringBuilder answerBuilder = new StringBuilder();
 
-            Iterator<String> iterator = agentWebClient.post()
-                .uri("/api/chat/stream")
-                .bodyValue(chatReq)
-                .retrieve()
-                .bodyToFlux(String.class)
-                .toStream()
-                .iterator();
+            try {
+                agentWebClient.post()
+                    .uri("/api/process/stream")
+                    .bodyValue(chatReq)
+                    .retrieve()
+                    .bodyToFlux(String.class)
+                    // 关键：30秒内必须收到任何一行（chunk或保活注释），否则认为假死
+                    .timeout(Duration.ofSeconds(30))
+                    .doOnNext(line -> {
+                        if (line == null || line.isEmpty()) return;
+                        // 如果Python加了SSE保活注释，直接忽略
+                        if (line.startsWith(":ping")) return;
 
-            while (iterator.hasNext()){
-                    String line = iterator.next();
-                    if(line == null || line.isEmpty()) {
-                        continue;
-                    }
-                    try {
-                        Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
-                        String type = (String) data.get("type");
-                        if("chunk".equals(type)) {
-                            String token = (String) data.get("content");
-                            if(token!= null) {
-                                answerBuilder.append(token);
-                                pushChunk(sid, token);
+                        if (line.isEmpty()) return;
+
+                        try {
+                            Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
+                            String type = (String) data.get("type");
+
+                            if ("chunk".equals(type)) {
+                                String token = (String) data.get("content");
+                                if (token != null) {
+                                    answerBuilder.append(token);
+                                    pushChunk(sid, token);
+                                }
+                            } else if ("error".equals(type)) {
+                                // Agent明确返回业务错误，终止整个流
+                                throw new RuntimeException((String) data.get("message"));
                             }
+                            // "done" 不需要处理，Flux自然结束
+                        } catch (Exception e) {
+                            log.error("解析 process chunk 失败，跳过: {}", line, e);
                         }
-                        else if("error".equals(type)) {
-                            throw new RuntimeException((String) data.get("message"));
-                        }
-                        else if("done".equals(type)) {
-                            break;
-                        }
-                    }catch (Exception e) {
-                        log.error("chat process JSON 解析失败，跳过该行: {}", line, e);
-                        continue;
-                    }
-                }
+                    })
+                    .blockLast(Duration.ofMinutes(5));
+            } catch (Exception e) {
+                throw new RuntimeException("Agent流处理失败: " + e.getMessage(), e);
+            }
 
             String answer = answerBuilder.toString();
 
