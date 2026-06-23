@@ -94,6 +94,8 @@ services:
       - AGENT_SERVICE_URL=http://vm-agent:8765
       - PARSER_SERVICE_URL=http://vm-parser:8001
       - NACOS_SERVER=vm-nacos:8848
+    ports:
+      - "8080:8080"
     depends_on:
       nacos:
         condition: service_healthy

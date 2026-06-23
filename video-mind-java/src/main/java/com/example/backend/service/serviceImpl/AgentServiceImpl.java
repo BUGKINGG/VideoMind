@@ -26,6 +26,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.ServiceInstance;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -51,10 +52,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Autowired
     private VideoMapper videoMapper;
     @Autowired
-    private RestTemplate restTemplate;
-    @Autowired
-    private SubtitleMapper subtitleMapper;
-    @Autowired
     private ConversationMapper conversationMapper;
     @Autowired
     private RabbitTemplate rabbitTemplate;
@@ -62,7 +59,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private AgentHealthChecker healthChecker;
     @Autowired
     private DiscoveryClient discoveryClient;
-
+    @Autowired
+    private SubtitleMapper subtitleMapper;
+    @Autowired
+    private RestTemplate restTemplate;
     @Value("${spring.cloud.nacos.discovery.instance-id}")
     private String instanceId;
 
@@ -92,6 +92,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Autowired
     private RedisLockUtil redisLockUtil;
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     // ========== 已经迁移到 Redis 的 ==========
     // key: videomind:sse:summary:{sid}  value: videoId
     // key: videomind:sse:chat:{sid}     value: conversationId:userMessageId
@@ -102,6 +104,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private static final String REDIS_VIDEO_AGENT_PREFIX = "videomind:video:agent_id:";
     private static final long REDIS_SSE_TTL_MINUTES = 10;
     private static final String REDIS_LOCK_VIDEO_PREFIX = "videomind:lock:video:";
+    private static final String REDIS_VIDEO_CACHE_PREFIX = "videomind:video:cache:";
+    private static final Duration VIDEO_CACHE_TTL = Duration.ofHours(24);
     private static final long LOCK_WAIT_RETRY_MS = 500;
     private static final int LOCK_MAX_RETRY = 6;
     private static final String REDIS_USER_LIMIT = "videomind:limit:";
@@ -156,7 +160,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         Integer part = BilibiliUrlUtils.extractPart(rawUrl);
         Long userId = BaseContext.getCurrentId();
 
-        // 用redis对用户进行限流，限制每10秒只能进行一次总结，放置脚本刷爆token
+        // 用redis对用户进行限流，限制每10秒只能进行一次总结，防止脚本刷爆token
         String limitKey = REDIS_USER_LIMIT + userId.toString();
         // 如果redis没有开或者死亡，则放行并抛出log，否则会阻塞业务
         // 但实际上如果redis死亡，后面的业务都无法实现，前端会返回500
@@ -167,12 +171,27 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 throw new RuntimeException("操作太频繁，请稍后再试");
             }
         }catch(Exception e){
-            log.warn("redis死亡，降级放行");
+            log.warn("redis死亡");
         }
 
         log.info("[Summary] 请求解析: rawUrl={}, baseUrl={}, part={}, userId={}", rawUrl, baseUrl, part, userId);
 
         // 先查询 video 数据表中有没有相同的url以及part，如果有则直接读取summary内容并且返回
+
+        // 先查 Redis 缓存
+        String cacheKey = REDIS_VIDEO_CACHE_PREFIX + baseUrl + ":" + part;
+        String cachedJson = redisTemplate.opsForValue().get(cacheKey);
+        if (cachedJson != null) {
+            try {
+                Video cachedVideo = objectMapper.readValue(cachedJson, Video.class);
+                log.info("[Summary] Redis 缓存命中: baseUrl={}, part={}", baseUrl, part);
+                return buildCacheResult(cachedVideo, userId);
+            } catch (Exception e) {
+                log.error("[Summary] Redis 缓存反序列化失败，降级查库", e);
+                // 脏数据直接删除
+                redisTemplate.delete(cacheKey);
+            }
+        }
         // 免去SSE的建立
         // 要求同一baseUrl，同一part，status为1
         Video exist = videoMapper.selectOne(
@@ -502,6 +521,17 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     protected void doProcess(Long videoId, String baseUrl, Integer part,
         Long userId, String cookie, String sid) {
+        // 临时 mock：直接返回，不调 Python，做测压用
+//        Video mock = new Video();
+//        mock.setId(videoId);
+//        mock.setTitle("mock");
+//        mock.setSummary("mock summary");
+//        mock.setStatus(1);
+//        mock.setSubtitleCount(0);
+//        videoMapper.updateById(mock);
+//        pushDone(sid, videoId, null, "mock", "mock summary", 0);
+//        return;
+
         if(!healthChecker.isHealthy()){
             log.error("Agent断线，拒绝处理 videoId = {}", videoId);
             // 直接标记失败，前端立即收到错误
@@ -666,6 +696,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             finish.setStatus(1);
             finish.setSubtitleCount(count);
             videoMapper.updateById(finish);
+
+            // 写入 Redis 缓存，供后续请求直接命中
+            try {
+                String cacheKey = REDIS_VIDEO_CACHE_PREFIX + baseUrl + ":" + part;
+                String videoJson = objectMapper.writeValueAsString(finish);
+                redisTemplate.opsForValue().set(cacheKey, videoJson, VIDEO_CACHE_TTL);
+                log.info("[Summary] 写入 Redis 缓存: videoId={}", videoId);
+            } catch (Exception e) {
+                log.error("[Summary] 写入 Redis 缓存失败", e);
+            }
 
             // 创建conversation表并且保存
             Conversation conversation = new Conversation();

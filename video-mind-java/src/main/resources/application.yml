@@ -77,3 +77,13 @@ spring:
         max-concurrency: 20
     publisher-confirm-type: correlated
     publisher-returns: true
+
+# 数据库测压
+management:
+  endpoints:
+    web:
+      exposure:
+        include: metrics,health,info  # 暴露 metrics 端点
+  endpoint:
+    health:
+      show-details: always
