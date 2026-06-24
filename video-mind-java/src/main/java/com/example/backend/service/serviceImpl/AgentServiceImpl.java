@@ -28,6 +28,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.client.DefaultServiceInstance;
 import org.springframework.cloud.client.ServiceInstance;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -45,6 +46,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
 @Service
@@ -81,6 +83,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     // 维护本实例持有的 sid，用于 @PreDestroy 批量清理
     private final Set<String> localSids = ConcurrentHashMap.newKeySet();
+
+    // 看门狗线程池，key: lockKey:lockValue
+    private final Map<String, Thread> watchdogThreads = new ConcurrentHashMap<>();
 
     private String instanceId;
 
@@ -273,14 +278,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         // 由于对redis是单进程的，而且指令的执行是单线程，因此所有请求会在redis中排队
         // 当有用户的线程拿到了锁，则该用户得到唯一的密码，否则返回null
         String lockKey = REDIS_LOCK_VIDEO_PREFIX + baseUrl + ":" + part;
-        String lockValue = redisLockUtil.tryLock(lockKey, Duration.ofSeconds(30));
+        LockHandle handle = tryLockWithWatchdog(lockKey, 30);
 
-       if (lockValue != null) {
-            // 获取锁成功，仅允许带了锁的线程对视频进行CRUD和解析（免得浪费token)
+        if (handle != null) {
             try {
-                // 3. 双重检查：拿到锁后再查一次（等锁期间可能别人已经创建好了）
-                // 这两次检查不能合并，如果不要上面的检查，会导致只有拿到锁的线程才能查到缓存
-                // 导致并行退化成串行（都被迫等到自己拿锁）
+                // 3. 双重检查：拿到锁后再查一次
                 exist = videoMapper.selectOne(
                     Wrappers.<Video>lambdaQuery()
                         .eq(Video::getUrl, baseUrl)
@@ -292,7 +294,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                     return buildCacheResult(exist, userId);
                 }
 
-                // 4. 确认没有正在处理中的记录（防止死锁残留或异常）
+                // 4. 确认没有正在处理中的记录
                 Video processing = videoMapper.selectOne(
                     Wrappers.<Video>lambdaQuery()
                         .eq(Video::getUrl, baseUrl)
@@ -300,7 +302,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         .eq(Video::getStatus, 0)
                 );
                 if (processing != null) {
-                    // 别人正在处理，直接共享等待（不重复创建）
                     log.info("[Summary] 发现已有任务在处理中，共享等待: videoId={}",
                         processing.getId());
                     return buildProcessingResult(processing, userId);
@@ -331,7 +332,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 task.setPart(part);
                 task.setBaseUrl(baseUrl);
                 task.setUserId(userId);
-                CorrelationData correlationData = new VideoCorrelationData(sid,videoId);
+                CorrelationData correlationData = new VideoCorrelationData(sid, videoId);
                 rabbitTemplate.convertAndSend("videomind.parse.exchange", "parse", task, correlationData);
 
                 SummaryResult res = new SummaryResult();
@@ -341,9 +342,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 return res;
 
             } finally {
-                // 6. 释放锁（30秒内任务肯定已经启动，锁可以释放）
-                // 实际处理由 CompletableFuture 在后台继续，不依赖锁
-                redisLockUtil.unlock(lockKey, lockValue);
+                handle.unlock();
             }
         }
 
@@ -560,6 +559,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         lastBusinessDataTime.remove(sid);
         redisTemplate.delete("videomind:sse:address:" + sid);
         redisTemplate.delete("videomind:sse:summary:" + sid);
+        redisTemplate.delete("videomind:sse:dead:" + sid);
     }
 
     /**
@@ -596,6 +596,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             pushError(sid, "AI服务当前不可用，请稍后重试");
             return;
         }
+        // 预加载等待队列，让后续 chunk 能推送给所有等待用户
+        final Set<String> waitingSids = redisTemplate.opsForSet()
+            .members("videomind:waiting:" + videoId);
+
         try {
             // 给python视频解析服务传递url和cookie
             String pythonUrl = parserServiceUrl + "/parse";
@@ -734,6 +738,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                                 if (token != null) {
                                     summaryBuilder.append(token);
                                     pushChunk(sid, token);
+                                    // 新增：推送给等待队列，所有等待用户也能看到打字机效果
+                                    if (waitingSids != null) {
+                                        for (String waitSid : waitingSids) {
+                                            if (!waitSid.equals(sid)) {
+                                                pushChunk(waitSid, token);
+                                            }
+                                        }
+                                    }
                                 }
                             } else if ("error".equals(type)) {
                                 // Agent明确返回业务错误，终止整个流
@@ -797,10 +809,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             // 最后推送完成事件，携带完整数据
             pushDone(sid, videoId, conversationId, title, summary, count);
             // 推送给等待队列
-            Set<String> waitingSids = redisTemplate.opsForSet()
-                .members("videomind:waiting:" + videoId);
-
-
             if (waitingSids != null) {
                 for (String waitSid : waitingSids) {
                     // 避免重复推给原始 sid
@@ -821,6 +829,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             videoMapper.updateById(fail);
 
             pushError(sid, e.getMessage());
+            if (waitingSids != null) {
+                for (String waitSid : waitingSids) {
+                    if (!waitSid.equals(sid)) {
+                        pushError(waitSid, e.getMessage());
+                    }
+                }
+                redisTemplate.delete("videomind:waiting:" + videoId);
+            }
         }
     }
 
@@ -860,11 +876,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         // 3. Redis 心跳优先于 Nacos：25 秒内无心跳直接判死
         if (!isInstanceAlive(targetInstanceId)) {
             log.error("[PushChunk] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
-            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofSeconds(30));
             redisTemplate.delete("videomind:sse:owner:" + sid);
         }
 
-            // 3. 通过 Nacos 查目标实例是否存活
         ServiceInstance target = findInstance(targetInstanceId);
         if (target == null) {
             log.warn("[PushChunk] sid={} 的目标实例 {} 已下线，清理脏数据", sid, targetInstanceId);
@@ -882,7 +897,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             .timeout(Duration.ofSeconds(5))
             .doOnError(e -> {
                 log.error("[PushChunk] 转发 chunk 到 {} 失败, sid={}", targetUrl, sid, e);
-                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofSeconds(30));
                 redisTemplate.delete("videomind:sse:owner:" + sid);
             })
             .subscribe();
@@ -926,7 +941,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         if (!isInstanceAlive(targetInstanceId)) {
             log.error("[PushDone] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
-            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofSeconds(30));
             redisTemplate.delete("videomind:sse:owner:" + sid);
             return;
         }
@@ -950,7 +965,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             .timeout(Duration.ofSeconds(5))
             .doOnError(e -> {
                 log.error("[PushDone] 转发 done 到 {} 失败, sid={}", targetUrl, sid, e);
-                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofSeconds(30));
                 redisTemplate.delete("videomind:sse:owner:" + sid);
             })
             .subscribe();
@@ -988,7 +1003,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
         if (!isInstanceAlive(targetInstanceId)) {
             log.error("[PushError] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
-            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofSeconds(30));
             redisTemplate.delete("videomind:sse:owner:" + sid);
             return;
         }
@@ -1008,7 +1023,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             .timeout(Duration.ofSeconds(5))
             .doOnError(e -> {
                 log.error("[PushError] 转发 error 到 {} 失败, sid={}", targetUrl, sid, e);
-                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofSeconds(30));
                 redisTemplate.delete("videomind:sse:owner:" + sid);
             })
             .subscribe();
@@ -1148,6 +1163,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         localSids.remove(sid);
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
+        redisTemplate.delete("videomind:sse:dead:" + sid);
     }
 
     protected void doChatProcess(String sid, Long conversationId, Long userId, String message) {
@@ -1318,14 +1334,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             log.error("MQ 解析任务异常, videoId={}", task.getVideoId(), e);
             // 异常后查状态，如果已标记失败则 ACK
             try {
-                Video video = videoMapper.selectById(task.getVideoId());
-                if (video != null && video.getStatus() == 2) {
-                    channel.basicAck(tag, false);
-                    return;
-                }
-            } catch (Exception ex) {}
-            // 否则重试一次
-            try { channel.basicNack(tag, false, true); } catch (IOException ex) {}
+                channel.basicNack(tag, false, false);
+            } catch (IOException ex) {
+                log.error("Nack 失败", ex);
+            }
         }
     }
 
@@ -1340,7 +1352,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             channel.basicAck(tag, false);
         } catch (Exception e) {
             log.error("MQ 对话任务失败", e);
-            try { channel.basicNack(tag, false, true); } catch (IOException ex) {}
+            try {
+                channel.basicNack(tag, false, false);
+            } catch (IOException ex) {
+                log.error("Nack 失败", ex);
+            }
         }
     }
 
@@ -1467,6 +1483,106 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             }
         } catch (Exception e) {
             log.error("[Destroy] 实例下线清理失败", e);
+        }
+    }
+
+    /**
+     * 获取锁并启动看门狗自动续期
+     * @param lockKey Redis key
+     * @param leaseSeconds 锁初始 TTL（秒）
+     * @return lockValue 锁标识，null 表示获取失败
+     */
+    private LockHandle tryLockWithWatchdog(String lockKey, long leaseSeconds) {
+        String lockValue = redisLockUtil.tryLock(lockKey, Duration.ofSeconds(leaseSeconds));
+        if (lockValue != null) {
+            startWatchdog(lockKey, lockValue, leaseSeconds);
+            return new LockHandle(lockKey, lockValue, this);
+        }
+        return null;
+    }
+
+    /**
+     * 启动看门狗线程：每 1/3 TTL 续期一次，最多续期 30 次（上限 5 分钟）
+     * 防止业务线程崩溃导致锁无限续期
+     */
+    private void startWatchdog(String lockKey, String lockValue, long leaseSeconds) {
+        Thread watchdog = new Thread(() -> {
+            long renewInterval = Math.max(leaseSeconds * 1000 / 3, 5000); // 至少 5 秒
+            int maxRenew = 30; // 30 * 10s ≈ 5 分钟上限
+            int count = 0;
+            while (!Thread.currentThread().isInterrupted() && count < maxRenew) {
+                try {
+                    Thread.sleep(renewInterval);
+                    // Lua 原子脚本：只有 value 匹配才续期
+                    String script = "if redis.call('get', KEYS[1]) == ARGV[1] then " +
+                        "return redis.call('expire', KEYS[1], ARGV[2]) " +
+                        "else return 0 end";
+                    Long result = redisTemplate.execute(
+                        new DefaultRedisScript<>(script, Long.class),
+                        Collections.singletonList(lockKey),
+                        lockValue,
+                        String.valueOf(leaseSeconds)
+                    );
+                    if (result == null || result == 0) {
+                        log.warn("[Watchdog] 锁已被释放或易主，停止续期: {}", lockKey);
+                        break;
+                    }
+                    count++;
+                    log.debug("[Watchdog] 续期成功 {}/{}: {}", count, maxRenew, lockKey);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.debug("[Watchdog] 被中断，停止续期: {}", lockKey);
+                    break;
+                } catch (Exception e) {
+                    log.error("[Watchdog] 续期异常: {}", lockKey, e);
+                    break;
+                }
+            }
+            if (count >= maxRenew) {
+                log.warn("[Watchdog] 达到最大续期次数，锁将自动过期: {}", lockKey);
+            }
+        });
+        watchdog.setDaemon(true);
+        watchdog.setName("lock-watchdog-" + lockKey);
+        watchdogThreads.put(lockKey + ":" + lockValue, watchdog);
+        watchdog.start();
+    }
+
+    /**
+     * 停止看门狗线程
+     */
+    private void stopWatchdog(String lockKey, String lockValue) {
+        Thread wd = watchdogThreads.remove(lockKey + ":" + lockValue);
+        if (wd != null) {
+            wd.interrupt();
+            try {
+                wd.join(2000); // 优雅等待 2 秒
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static class LockHandle {
+        private final String lockKey;
+        private final String lockValue;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+        private final AgentServiceImpl outer;
+
+        LockHandle(String lockKey, String lockValue, AgentServiceImpl outer) {
+            this.lockKey = lockKey;
+            this.lockValue = lockValue;
+            this.outer = outer;
+        }
+
+        void unlock() {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    outer.redisLockUtil.unlock(lockKey, lockValue);
+                } finally {
+                    outer.stopWatchdog(lockKey, lockValue);
+                }
+            }
         }
     }
 }

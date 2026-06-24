@@ -420,6 +420,7 @@ function processSseChunk(chunk) {
       }
       isLoading.value = false
       confirm_text.value = '开始总结'
+      return {type: 'done'}
     }
     else if (eventName === 'error') {
       const msg = data.message || '未知错误'
@@ -434,6 +435,7 @@ function processSseChunk(chunk) {
       }
       isLoading.value = false
       confirm_text.value = '开始总结'
+      return { type: 'error' }
     }
   } catch (e) {
     // 单条消息格式不对不中断整个流，打印调试
@@ -572,6 +574,10 @@ async function startSummary() {
       for (const chunk of chunks) {
         processSseChunk(chunk)
       }
+    }
+
+    if (!isStreamCompleted) {
+      alert('连接意外中断，视频可能已解析完成，请刷新页面查看历史记录')
     }
 
   } catch (error) {

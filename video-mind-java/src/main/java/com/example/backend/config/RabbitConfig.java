@@ -4,15 +4,15 @@ import com.example.backend.common.VideoCorrelationData;
 import com.example.backend.entity.Video;
 import com.example.backend.mapper.VideoMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.Binding;
-import org.springframework.amqp.core.BindingBuilder;
-import org.springframework.amqp.core.DirectExchange;
-import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.*;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.boot.amqp.autoconfigure.RabbitTemplateCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.HashMap;
+import java.util.Map;
 
 @Configuration
 @Slf4j
@@ -21,7 +21,6 @@ public class RabbitConfig {
     @Bean
     public RabbitTemplateCustomizer rabbitTemplateCustomizer(VideoMapper videoMapper) {
         return template -> {
-            // ① Confirm 回调
             template.setConfirmCallback((correlationData, ack, cause) -> {
                 String id = correlationData != null ? correlationData.getId() : "unknown";
                 if (ack) {
@@ -45,7 +44,6 @@ public class RabbitConfig {
                 }
             });
 
-            // ② Return 回调
             template.setReturnsCallback(returned -> {
                 log.error("[MQ Return] 消息路由失败: exchange={}, routingKey={}, replyCode={}, replyText={}",
                     returned.getExchange(),
@@ -58,20 +56,23 @@ public class RabbitConfig {
         };
     }
 
-
     @Bean
     public MessageConverter jsonMessageConverter() {
         return new JacksonJsonMessageConverter();
     }
 
+    // ========== 解析任务队列（带死信） ==========
     @Bean
     public Queue parseQueue() {
-        return new Queue("videomind.parse.queue", true);
+        Map<String, Object> args = new HashMap<>();
+        args.put("x-dead-letter-exchange", "videomind.parse.dlx");
+        args.put("x-dead-letter-routing-key", "parse.failed");
+        return new Queue("videomind.parse.queue", true, false, false, args);
     }
 
     @Bean
-    public Queue chatQueue() {
-        return new Queue("videomind.chat.queue", true);
+    public Queue parseDlq() {
+        return new Queue("videomind.parse.dlq", true);
     }
 
     @Bean
@@ -80,8 +81,8 @@ public class RabbitConfig {
     }
 
     @Bean
-    public DirectExchange chatExchange() {
-        return new DirectExchange("videomind.chat.exchange");
+    public DirectExchange parseDlx() {
+        return new DirectExchange("videomind.parse.dlx");
     }
 
     @Bean
@@ -90,7 +91,41 @@ public class RabbitConfig {
     }
 
     @Bean
+    public Binding parseDlqBinding() {
+        return BindingBuilder.bind(parseDlq()).to(parseDlx()).with("parse.failed");
+    }
+
+    // ========== 聊天任务队列（带死信） ==========
+    @Bean
+    public Queue chatQueue() {
+        Map<String, Object> args = new HashMap<>();
+        args.put("x-dead-letter-exchange", "videomind.chat.dlx");
+        args.put("x-dead-letter-routing-key", "chat.failed");
+        return new Queue("videomind.chat.queue", true, false, false, args);
+    }
+
+    @Bean
+    public Queue chatDlq() {
+        return new Queue("videomind.chat.dlq", true);
+    }
+
+    @Bean
+    public DirectExchange chatExchange() {
+        return new DirectExchange("videomind.chat.exchange");
+    }
+
+    @Bean
+    public DirectExchange chatDlx() {
+        return new DirectExchange("videomind.chat.dlx");
+    }
+
+    @Bean
     public Binding chatBinding() {
         return BindingBuilder.bind(chatQueue()).to(chatExchange()).with("chat");
+    }
+
+    @Bean
+    public Binding chatDlqBinding() {
+        return BindingBuilder.bind(chatDlq()).to(chatDlx()).with("chat.failed");
     }
 }
