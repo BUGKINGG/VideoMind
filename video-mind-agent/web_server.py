@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -34,12 +35,13 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                     self._send_json({"status": "ok"})
                 except:
                     self._send_json({"status": "error"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
 
-            if path == "/api/videos":
+            elif path == "/api/videos":
                 self._send_json({"videos": agent.video_repository.list_videos()})
                 return
-
-            super().do_GET()
+            else:
+                super().do_GET()
         except Exception as error:
             self._send_json(
                 {"error": f"Unexpected server error: {error}"},
@@ -107,6 +109,31 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
 
+        # 用于停止 ping 线程
+        stop_event = threading.Event()
+        write_lock = threading.Lock()
+
+        def ping_worker():
+            """独立线程：每 5 秒发送 SSE 保活注释，不依赖 LLM 生成循环"""
+            while not stop_event.is_set():
+                try:
+                    time.sleep(5)
+                    if stop_event.is_set():
+                        break
+                    with write_lock:
+                        self.wfile.write(b"data: :ping\n\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    # 连接已断开，退出线程
+                    break
+                except Exception:
+                    # 其他异常，继续尝试
+                    pass
+
+        # 启动保活线程
+        ping_thread = threading.Thread(target=ping_worker, daemon=True)
+        ping_thread.start()
+
         try:
             # 加载上下文
             print(f"[DEBUG] /api/chat/stream received: user_id={user_id}, session_id={session_id}, video_id={video_id}, question={question[:30]}")
@@ -129,20 +156,15 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
             # 流式生成
             full_answer = []
-            last_ping = time.time()
             for token in agent.video_qa.answer_stream(transcript, question, chunks, history):
                 full_answer.append(token)
                 payload = json.dumps({
                     "type": "chunk",
                     "content": token,
                 }, ensure_ascii=False)
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-
-                if time.time() - last_ping > 10:
-                    self.wfile.write(b":ping\n\n")
+                with write_lock:
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                    last_ping = time.time()
 
             # 保存对话（流结束后）
             answer = "".join(full_answer)
@@ -167,12 +189,17 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                     for chunk in chunks
                 ],
             }, ensure_ascii=False)
-            self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
-            self.wfile.flush()
-            self.close_connection = True
+            with write_lock:
+                self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                self.close_connection = True
 
         except Exception as e:
             self._send_sse_error(str(e))
+        finally:
+            # 关键：无论成功还是异常，停止 ping 线程
+            stop_event.set()
+            ping_thread.join(timeout=2)
 
     def _handle_process_stream(self, body: dict) -> None:
         """视频处理流式接口：存字幕 → 索引 → 流式总结"""
@@ -188,6 +215,29 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+
+        # 用于停止 ping 线程
+        stop_event = threading.Event()
+        write_lock = threading.Lock()
+
+        def ping_worker():
+            """独立线程：每 5 秒发送 SSE 保活注释，不依赖 LLM 生成循环"""
+            while not stop_event.is_set():
+                try:
+                    time.sleep(5)
+                    if stop_event.is_set():
+                        break
+                    with write_lock:
+                        self.wfile.write(b"data: :ping\n\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    break
+                except Exception:
+                    pass
+
+        # 启动保活线程
+        ping_thread = threading.Thread(target=ping_worker, daemon=True)
+        ping_thread.start()
 
         try:
             # 1. 存字幕
@@ -209,20 +259,15 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
             # 3. 流式总结
             full_summary = []
-            last_ping = time.time()
             for token in agent.video_summarizer.summarize_stream(transcript=transcript, chunks=chunks):
                 full_summary.append(token)
                 payload = json.dumps({
                     "type": "chunk",
                     "content": token,
                 }, ensure_ascii=False)
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-
-                if time.time() - last_ping > 10:
-                    self.wfile.write(b":ping\n\n")
+                with write_lock:
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                    last_ping = time.time()
 
             # 4. 推 done
             summary = "".join(full_summary)
@@ -232,12 +277,17 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 "title": title,
                 "summary": summary,
             }, ensure_ascii=False)
-            self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
-            self.wfile.flush()
-            self.close_connection = True
+            with write_lock:
+                self.wfile.write(f"data: {done_payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                self.close_connection = True
 
         except Exception as e:
             self._send_sse_error(str(e))
+        finally:
+            # 关键：无论成功还是异常，停止 ping 线程
+            stop_event.set()
+            ping_thread.join(timeout=2)
 
     def _send_sse_error(self, message: str) -> None:
         """在 SSE 流中发送错误事件"""

@@ -12,12 +12,14 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - vm-net
-    healthcheck:
-      test: ["CMD", "mysql", "-uroot", "-p123456", "-e", "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'nacos';"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=128M
+      --max-connections=50
 
   redis:
     image: redis:7-alpine
@@ -26,9 +28,13 @@ services:
       - "6379:6379"
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
   rabbitmq:
-    image: rabbitmq:4-management
+    image: rabbitmq:4-management-alpine
     container_name: vm-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: admin
@@ -38,9 +44,13 @@ services:
       - "15672:15672"
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.9.0
     container_name: vm-qdrant
     ports:
       - "6333:6333"
@@ -48,18 +58,28 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   video-mind-parser:
     build: ./video-mind-agent
+    image: vm-parser:latest
     container_name: vm-parser
     command: python fetch_video.py
     ports:
       - "8001:8001"
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   video-mind-agent:
     build: ./video-mind-agent
+    image: vm-agent:latest
     container_name: vm-agent
     command: python web_server.py
     environment:
@@ -79,11 +99,17 @@ services:
       - agent_data:/app/data
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
-  # ========== Java 后端 ==========
   video-mind-java:
     build: ./video-mind-java
+    image: vm-java:latest
+    container_name: vm-java
     environment:
+      - JAVA_OPTS=-Xms512m -Xmx512m -XX:+UseG1GC
       - SPRING_DATASOURCE_URL=jdbc:mysql://vm-mysql:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
       - SPRING_DATASOURCE_USERNAME=root
       - SPRING_DATASOURCE_PASSWORD=123456
@@ -97,26 +123,27 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      nacos:
-        condition: service_healthy
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      rabbitmq:
-        condition: service_started
-      video-mind-parser:
-        condition: service_started
-      video-mind-agent:
-        condition: service_started
+      - mysql
+      - redis
+      - rabbitmq
+      - video-mind-parser
+      - video-mind-agent
+      - nacos
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 768M
 
   nacos:
     image: nacos/nacos-server:v2.3.0
     container_name: vm-nacos
     environment:
       - MODE=standalone
+      - JVM_XMS=256m
+      - JVM_XMX=256m
+      - JVM_XMN=128m
       - SPRING_DATASOURCE_PLATFORM=mysql
       - MYSQL_SERVICE_HOST=vm-mysql
       - MYSQL_SERVICE_DB_NAME=nacos
@@ -128,21 +155,17 @@ services:
       - "8848:8848"
       - "9848:9848"
     depends_on:
-      mysql:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/index.html"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
+      - mysql
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
-  # ========== Vue + Nginx 前端 ==========
   video-mind-web:
     build: ./video-mind-web
+    image: vm-web:latest
     container_name: vm-web
     ports:
       - "80:80"
@@ -150,6 +173,10 @@ services:
       - video-mind-java
     networks:
       - vm-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
 volumes:
   mysql_data:

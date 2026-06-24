@@ -93,6 +93,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private RedisLockUtil redisLockUtil;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Map<String, Long> lastBusinessDataTime = new ConcurrentHashMap<>();
 
     // ========== 已经迁移到 Redis 的 ==========
     // key: videomind:sse:summary:{sid}  value: videoId
@@ -507,6 +508,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private void cleanSid(String sid) {
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
+        lastBusinessDataTime.remove(sid);  // 新增
+        redisTemplate.delete("videomind:sse:address:" + sid);
+        redisTemplate.delete("videomind:sse:summary:" + sid);
     }
 
     /**
@@ -657,8 +661,18 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                     .timeout(Duration.ofSeconds(30))
                     .doOnNext(line -> {
                         if (line == null || line.isEmpty()) return;
-                        // 如果Python加了SSE保活注释，直接忽略
-                        if (line.startsWith(":ping")) return;
+                        // 保活注释：不处理，但检查业务层假死
+                        if (line.startsWith(":ping")) {
+                            Long lastBiz = lastBusinessDataTime.get(sid);
+                            if (lastBiz != null && System.currentTimeMillis() - lastBiz > 25000) {
+                                // 25秒没有业务数据，只有ping，认为Agent假死
+                                throw new RuntimeException("Agent业务层假死，25秒无有效chunk");
+                            }
+                            return;
+                        }
+
+                        // 业务数据：更新时间戳
+                        lastBusinessDataTime.put(sid, System.currentTimeMillis());
 
                         if (line.isEmpty()) return;
 
@@ -680,6 +694,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         } catch (Exception e) {
                             log.error("解析 process chunk 失败，跳过: {}", line, e);
                         }
+                    })
+                    .doOnError(e -> {
+                        lastBusinessDataTime.remove(sid); // 清理，避免内存泄漏
+                        log.error("Agent流处理异常, sid={}", sid, e);
                     })
                     .blockLast(Duration.ofMinutes(5));
             } catch (Exception e) {
@@ -753,7 +771,6 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             fail.setSummary("处理失败: " + e.getMessage());
             videoMapper.updateById(fail);
 
-            // ========== SSE 推送错误给前端 ==========
             pushError(sid, e.getMessage());
         }
     }
@@ -1068,10 +1085,18 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                     .timeout(Duration.ofSeconds(30))
                     .doOnNext(line -> {
                         if (line == null || line.isEmpty()) return;
-                        // 如果Python加了SSE保活注释，直接忽略
-                        if (line.startsWith(":ping")) return;
+                        // 保活注释：不处理，但检查业务层假死
+                        if (line.startsWith(":ping")) {
+                            Long lastBiz = lastBusinessDataTime.get(sid);
+                            if (lastBiz != null && System.currentTimeMillis() - lastBiz > 25000) {
+                                // 25秒没有业务数据，只有ping，认为Agent假死
+                                throw new RuntimeException("Agent业务层假死，25秒无有效chunk");
+                            }
+                            return;
+                        }
 
-                        if (line.isEmpty()) return;
+                        // 业务数据：更新时间戳
+                        lastBusinessDataTime.put(sid, System.currentTimeMillis());
 
                         try {
                             Map<String, Object> data = new ObjectMapper().readValue(line, Map.class);
@@ -1091,6 +1116,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         } catch (Exception e) {
                             log.error("解析 process chunk 失败，跳过: {}", line, e);
                         }
+                    })
+                    .doOnError(e -> {
+                        lastBusinessDataTime.remove(sid); // 清理，避免内存泄漏
+                        log.error("Agent流处理异常, sid={}", sid, e);
                     })
                     .blockLast(Duration.ofMinutes(5));
             } catch (Exception e) {
