@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.Channel;
 import io.netty.channel.ChannelOption;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
@@ -30,12 +31,14 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
 
 
 import java.io.IOException;
@@ -82,6 +85,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // 用于存储前端建立的 SSE 长连接，处理完成后通过该连接推送结果
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
+    // 维护本实例持有的 sid，用于 @PreDestroy 批量清理
+    private final Set<String> localSids = ConcurrentHashMap.newKeySet();
+
 
 
     @Autowired
@@ -115,6 +121,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     @PostConstruct
     public void init() {
+        // 前端agent流，长连接，大超时
         this.agentWebClient = WebClient.builder().baseUrl(agentServiceUrl)
             .clientConnector(new ReactorClientHttpConnector(
                 HttpClient.create()
@@ -123,13 +130,20 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             ))
             .build();
 
+        // 实例间回调，短平快
+        ConnectionProvider callbackProvider = ConnectionProvider.builder("callback-pool")
+            .maxConnections(100)
+            .pendingAcquireMaxCount(500)
+            .pendingAcquireTimeout(Duration.ofSeconds(3))
+            .build();
+
+        HttpClient callbackHttpClient = HttpClient.create(callbackProvider)
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000)
+            .responseTimeout(Duration.ofSeconds(5));
+
         // 实例间调用 webclient
         this.instanceWebClient = WebClient.builder()
-            .clientConnector(new ReactorClientHttpConnector(
-                HttpClient.create()
-                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
-                    .responseTimeout(Duration.ofSeconds(10))
-            ))
+            .clientConnector(new ReactorClientHttpConnector(callbackHttpClient))
             .build();
 
         // 启动后延迟 5 秒，等 Nacos 注册完成，然后查自己的真实 instanceId
@@ -408,6 +422,22 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      */
     @Override
     public SseEmitter connectSse(String sid) {
+        // 1. 墓碑检查：如果该 sid 已被标记实例死亡，立即告知前端
+        String deadKey = "videomind:sse:dead:" + sid;
+        String deadReason = redisTemplate.opsForValue().get(deadKey);
+        if (deadReason != null) {
+            SseEmitter deadEmitter = new SseEmitter(0L);
+            try {
+                deadEmitter.send(SseEmitter.event()
+                    .name("error")
+                    .data("{\"type\":\"error\",\"message\":\"服务实例已失效(" + deadReason + ")，请重新提交请求\"}"));
+                deadEmitter.complete();
+            } catch (Exception e) {
+                log.error("发送死亡通知失败", e);
+            }
+            redisTemplate.delete(deadKey);
+            return deadEmitter;
+        }
         String redisKey = REDIS_SSE_SUMMARY_PREFIX + sid;
         String videoIdStr = redisTemplate.opsForValue().get(redisKey);
 
@@ -506,9 +536,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 防止连接断开后 emitter 和映射关系残留在内存中导致泄漏
      */
     private void cleanSid(String sid) {
+        localSids.remove(sid);
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
-        lastBusinessDataTime.remove(sid);  // 新增
+        lastBusinessDataTime.remove(sid);
         redisTemplate.delete("videomind:sse:address:" + sid);
         redisTemplate.delete("videomind:sse:summary:" + sid);
     }
@@ -796,6 +827,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
         // 2. 本地没有，查 Redis 找目标实例
+        String deadKey = "videomind:sse:dead" + sid;
+        if(Boolean.TRUE.equals(redisTemplate.hasKey(deadKey))){
+            log.warn("[PushChunk] sid={} 已标记实例死亡，丢弃后续 chunk", sid);
+            return;
+        }
         String targetInstanceId = redisTemplate.opsForValue()
             .get("videomind:sse:owner:" + sid);
         if (targetInstanceId == null) {
@@ -803,7 +839,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
 
-        // 3. 通过 Nacos 查目标实例是否存活
+        // 3. Redis 心跳优先于 Nacos：25 秒内无心跳直接判死
+        if (!isInstanceAlive(targetInstanceId)) {
+            log.error("[PushChunk] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+        }
+
+            // 3. 通过 Nacos 查目标实例是否存活
         ServiceInstance target = findInstance(targetInstanceId);
         if (target == null) {
             log.warn("[PushChunk] sid={} 的目标实例 {} 已下线，清理脏数据", sid, targetInstanceId);
@@ -819,7 +862,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             .retrieve()
             .toBodilessEntity()
             .timeout(Duration.ofSeconds(5))
-            .doOnError(e -> log.error("[PushChunk] 转发 chunk 到 {} 失败, sid={}", targetUrl, sid, e))
+            .doOnError(e -> {
+                log.error("[PushChunk] 转发 chunk 到 {} 失败, sid={}", targetUrl, sid, e);
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.delete("videomind:sse:owner:" + sid);
+            })
             .subscribe();
     }
 
@@ -827,7 +874,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * SSE 流式推送：完成事件
      * 携带完整的视频数据和总结内容，前端收到后标记流式结束
      */
-    private void pushDone(String sid, Long videoId, Long conversationId, String title, String summary, int count) {
+    private void pushDone(String sid, Long videoId, Long conversationId,
+                          String title, String summary, int count) {
         SseEmitter emitter = emitters.get(sid);
         if (emitter != null) {
             try {
@@ -848,10 +896,22 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
 
-        // 远程转发
+        String deadKey = "videomind:sse:dead:" + sid;
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(deadKey))) {
+            log.warn("[PushDone] sid={} 已标记死亡，丢弃", sid);
+            return;
+        }
+
         String targetInstanceId = redisTemplate.opsForValue()
             .get("videomind:sse:owner:" + sid);
         if (targetInstanceId == null) return;
+
+        if (!isInstanceAlive(targetInstanceId)) {
+            log.error("[PushDone] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
 
         ServiceInstance target = findInstance(targetInstanceId);
         if (target == null) {
@@ -860,21 +920,22 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
-        try {
-            instanceWebClient.post()
-                .uri(targetUrl + "/internal/sse/push")
-                .bodyValue(Map.of(
-                    "sid", sid, "type", "done",
-                    "videoId", videoId, "conversationId", conversationId,
-                    "title", title, "summary", summary, "subtitleCount", count
-                ))
-                .retrieve()
-                .toBodilessEntity()
-                .timeout(Duration.ofSeconds(5))
-                .block(); // 终态同步等待
-        } catch (Exception e) {
-            log.error("[PushDone] 转发 done 到 {} 失败, sid={}", targetUrl, sid, e);
-        }
+        instanceWebClient.post()
+            .uri(targetUrl + "/internal/sse/push")
+            .bodyValue(Map.of(
+                "sid", sid, "type", "done",
+                "videoId", videoId, "conversationId", conversationId,
+                "title", title, "summary", summary, "subtitleCount", count
+            ))
+            .retrieve()
+            .toBodilessEntity()
+            .timeout(Duration.ofSeconds(5))
+            .doOnError(e -> {
+                log.error("[PushDone] 转发 done 到 {} 失败, sid={}", targetUrl, sid, e);
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.delete("videomind:sse:owner:" + sid);
+            })
+            .subscribe();
     }
 
     /**
@@ -897,9 +958,22 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
 
+        String deadKey = "videomind:sse:dead:" + sid;
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(deadKey))) {
+            log.warn("[PushError] sid={} 已标记死亡，丢弃", sid);
+            return;
+        }
+
         String targetInstanceId = redisTemplate.opsForValue()
             .get("videomind:sse:owner:" + sid);
         if (targetInstanceId == null) return;
+
+        if (!isInstanceAlive(targetInstanceId)) {
+            log.error("[PushError] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofMinutes(5));
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
 
         ServiceInstance target = findInstance(targetInstanceId);
         if (target == null) {
@@ -908,17 +982,18 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
-        try {
-            instanceWebClient.post()
-                .uri(targetUrl + "/internal/sse/push")
-                .bodyValue(Map.of("sid", sid, "type", "error", "message", errorMsg))
-                .retrieve()
-                .toBodilessEntity()
-                .timeout(Duration.ofSeconds(5))
-                .block();
-        } catch (Exception e) {
-            log.error("[PushError] 转发 error 到 {} 失败, sid={}", targetUrl, sid, e);
-        }
+        instanceWebClient.post()
+            .uri(targetUrl + "/internal/sse/push")
+            .bodyValue(Map.of("sid", sid, "type", "error", "message", errorMsg))
+            .retrieve()
+            .toBodilessEntity()
+            .timeout(Duration.ofSeconds(5))
+            .doOnError(e -> {
+                log.error("[PushError] 转发 error 到 {} 失败, sid={}", targetUrl, sid, e);
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofMinutes(5));
+                redisTemplate.delete("videomind:sse:owner:" + sid);
+            })
+            .subscribe();
     }
 
 
@@ -958,84 +1033,101 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
    public SseEmitter connectChatSse(String sid) {
-    // 1. 从 Redis 验证 sid 是否存在
-    String redisKey = REDIS_SSE_CHAT_PREFIX + sid;
-    String convIdStr = redisTemplate.opsForValue().get(redisKey);
+       // 墓碑检查
+       String deadKey = "videomind:sse:dead:" + sid;
+       String deadReason = redisTemplate.opsForValue().get(deadKey);
+       if (deadReason != null) {
+           SseEmitter deadEmitter = new SseEmitter(0L);
+           try {
+               deadEmitter.send(SseEmitter.event()
+                   .name("error")
+                   .data("{\"type\":\"error\",\"message\":\"服务实例已失效(" + deadReason + ")，请重新提交请求\"}"));
+               deadEmitter.complete();
+           } catch (Exception e) {
+               log.error("发送对话死亡通知失败", e);
+           }
+           redisTemplate.delete(deadKey);
+           return deadEmitter;
+       }
+        // 从 Redis 验证 sid 是否存在
+        String redisKey = REDIS_SSE_CHAT_PREFIX + sid;
+        String convIdStr = redisTemplate.opsForValue().get(redisKey);
 
-    if (convIdStr == null) {
-        // sid 不存在或已过期，直接返回错误并关闭
-        SseEmitter deadEmitter = new SseEmitter(0L);
-        try {
-            deadEmitter.send(SseEmitter.event()
-                .name("error")
-                .data("{\"type\":\"error\",\"message\":\"会话已过期或不存在\"}"));
-            deadEmitter.complete();
-        } catch (Exception e) {
-            log.error("发送对话过期通知失败", e);
+        if (convIdStr == null) {
+            // sid 不存在或已过期，直接返回错误并关闭
+            SseEmitter deadEmitter = new SseEmitter(0L);
+            try {
+                deadEmitter.send(SseEmitter.event()
+                    .name("error")
+                    .data("{\"type\":\"error\",\"message\":\"会话已过期或不存在\"}"));
+                deadEmitter.complete();
+            } catch (Exception e) {
+                log.error("发送对话过期通知失败", e);
+            }
+            return deadEmitter;
         }
-        return deadEmitter;
-    }
 
-    Long conversationId;
-    Long userMessageId = null;
-    if (convIdStr.contains(":")) {
-        String[] parts = convIdStr.split(":");
-        conversationId = Long.valueOf(parts[0]);
-        userMessageId = Long.valueOf(parts[1]);
-    } else {
-        conversationId = Long.valueOf(convIdStr);
-    }
+        Long conversationId;
+        Long userMessageId = null;
+        if (convIdStr.contains(":")) {
+            String[] parts = convIdStr.split(":");
+            conversationId = Long.valueOf(parts[0]);
+            userMessageId = Long.valueOf(parts[1]);
+        } else {
+            conversationId = Long.valueOf(convIdStr);
+        }
 
-    // 2. 双重检查：后台线程 doChatProcess 可能已经跑完了
-    // 查 message 表，看是否已有属于本次用户消息的 AI 回复（id 大于当前用户消息 id）
-    Message latestAiMsg = messageMapper.selectOne(
-        Wrappers.<Message>lambdaQuery()
-            .eq(Message::getConversationId, conversationId)
-            .eq(Message::getRole, "ai")
-            .gt(userMessageId != null, Message::getId, userMessageId)
-            .orderByDesc(Message::getId)
-            .last("LIMIT 1")
-    );
+        // 2. 双重检查：后台线程 doChatProcess 可能已经跑完了
+        // 查 message 表，看是否已有属于本次用户消息的 AI 回复（id 大于当前用户消息 id）
+        Message latestAiMsg = messageMapper.selectOne(
+            Wrappers.<Message>lambdaQuery()
+                .eq(Message::getConversationId, conversationId)
+                .eq(Message::getRole, "ai")
+                .gt(userMessageId != null, Message::getId, userMessageId)
+                .orderByDesc(Message::getId)
+                .last("LIMIT 1")
+        );
 
-    if (latestAiMsg != null) {
-        // 已经处理完成，直接补发 done 事件，不挂起等待
-        SseEmitter emitter = new SseEmitter(30_000L);
+        if (latestAiMsg != null) {
+            // 已经处理完成，直接补发 done 事件，不挂起等待
+            SseEmitter emitter = new SseEmitter(30_000L);
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "done");
+                payload.put("conversationId", conversationId);
+                payload.put("answer", latestAiMsg.getContent());
+                emitter.send(SseEmitter.event()
+                    .name("message")
+                    .data(new ObjectMapper().writeValueAsString(payload)));
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("补发对话完成事件失败, sid={}, conversationId={}", sid, conversationId, e);
+            }
+            return emitter;
+        }
+
+        // 3. 还在处理中，建立 SSE 长连接等待 doChatProcess 推送
+        SseEmitter emitter = new SseEmitter(120_000L);
+        emitters.put(sid, emitter);
+
+        registerSseOwner(sid);
+
+        emitter.onCompletion(() -> cleanChatSid(sid));
+        emitter.onTimeout(() -> cleanChatSid(sid));
+        emitter.onError((e) -> cleanChatSid(sid));
+
         try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("type", "done");
-            payload.put("conversationId", conversationId);
-            payload.put("answer", latestAiMsg.getContent());
             emitter.send(SseEmitter.event()
-                .name("message")
-                .data(new ObjectMapper().writeValueAsString(payload)));
-            emitter.complete();
+                .name("connect")
+                .data("{\"status\":0,\"msg\":\"connected\"}"));
         } catch (Exception e) {
-            log.error("补发对话完成事件失败, sid={}, conversationId={}", sid, conversationId, e);
+            cleanChatSid(sid);
         }
         return emitter;
     }
 
-    // 3. 还在处理中，建立 SSE 长连接等待 doChatProcess 推送
-    SseEmitter emitter = new SseEmitter(120_000L);
-    emitters.put(sid, emitter);
-
-    registerSseOwner(sid);
-
-    emitter.onCompletion(() -> cleanChatSid(sid));
-    emitter.onTimeout(() -> cleanChatSid(sid));
-    emitter.onError((e) -> cleanChatSid(sid));
-
-    try {
-        emitter.send(SseEmitter.event()
-            .name("connect")
-            .data("{\"status\":0,\"msg\":\"connected\"}"));
-    } catch (Exception e) {
-        cleanChatSid(sid);
-    }
-    return emitter;
-}
-
     private void cleanChatSid(String sid) {
+        localSids.remove(sid);
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
     }
@@ -1235,6 +1327,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     private void registerSseOwner(String sid) {
+        localSids.add(sid);
         redisTemplate.opsForValue().set(
             "videomind:sse:owner:" + sid,
             instanceId,
@@ -1286,6 +1379,62 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             log.warn("[Nacos] 未找到匹配本机({}:{})的实例", ip, serverPort);
         } catch (Exception e) {
             log.error("[Nacos] 刷新 instanceId 失败", e);
+        }
+    }
+
+    /**
+     * 心跳机制，每10s向redis中注册心跳，过期时间30s
+     * 如果心跳停了（redis中数据过期），则认为实例死亡
+     */
+    @Scheduled(initialDelay = 10_000, fixedRate = 10_000)
+    public void heartbeat(){
+        try{
+            redisTemplate.opsForValue().set(
+                "videomind:instance:alive:" + instanceId,
+                String.valueOf(System.currentTimeMillis()),
+                Duration.ofSeconds(30)
+            );
+        } catch (Exception e){
+            log.error("[Hearbeat] 刷新失败", e);
+        }
+    }
+
+    /**
+     * 检测目标实例死了没有
+     * @param targetInstanceId
+     * @return
+     */
+    public boolean isInstanceAlive(String targetInstanceId){
+        if(targetInstanceId == null || targetInstanceId.isBlank()){
+            return false;
+        }
+        try {
+            String ts = redisTemplate.opsForValue().get("videomind:instance:alive" + instanceId);
+            // 如果该实例不存在
+            if(ts == null){
+                return false;
+            }
+            return System.currentTimeMillis() - Long.parseLong(ts) < 25_000;
+        }catch (Exception e){
+            return false;
+        }
+    }
+
+    /**
+     * Bean回收前执行的方法，用于注销
+     */
+    @PreDestroy
+    public void onDestroy() {
+        try {
+            redisTemplate.delete("videomind:instance:alive:" + instanceId);
+            if (!localSids.isEmpty()) {
+                for (String sid : localSids) {
+                    redisTemplate.delete("videomind:sse:owner:" + sid);
+                }
+                log.info("[Destroy] 实例 {} 主动下线，清理 {} 个 sid 映射", instanceId, localSids.size());
+            }
+        } catch (Exception e) {
+            log.error("[Destroy] 实例下线清理失败", e);
         }
     }
 }
