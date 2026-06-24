@@ -29,29 +29,11 @@ mybatis-plus:
 spring:
   application:
     name: video-mind-java
-  config:
-    import:
-      - optional:nacos:video-mind-java.properties?refreshEnabled=true
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/video_mind?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai}
     username: ${SPRING_DATASOURCE_USERNAME:root}
     password: ${SPRING_DATASOURCE_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
-  cloud:
-    nacos:
-      discovery:
-        server-addr: ${NACOS_SERVER:localhost:8848}
-        namespace: ${NACOS_NAMESPACE:public}
-        group: ${NACOS_GROUP:DEFAULT_GROUP}
-        instance-id: ${spring.application.name}:${HOSTNAME:${random.value}}
-        heart-beat-interval: 5000
-        heart-beat-timeout: 15000
-        fail-fast: false
-      config:
-        server-addr: ${NACOS_SERVER:localhost:8848}
-        namespace: ${NACOS_NAMESPACE:public}
-        group: ${NACOS_GROUP:DEFAULT_GROUP}
-        file-extension: properties
   data:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}

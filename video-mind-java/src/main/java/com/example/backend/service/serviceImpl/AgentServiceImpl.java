@@ -25,9 +25,8 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cloud.client.DefaultServiceInstance;
 import org.springframework.cloud.client.ServiceInstance;
-import org.springframework.cloud.client.discovery.DiscoveryClient;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -38,7 +37,6 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.netty.http.client.HttpClient;
-import reactor.netty.resources.ConnectionProvider;
 
 
 import java.io.IOException;
@@ -61,13 +59,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Autowired
     private AgentHealthChecker healthChecker;
     @Autowired
-    private DiscoveryClient discoveryClient;
-    @Autowired
     private SubtitleMapper subtitleMapper;
     @Autowired
     private RestTemplate restTemplate;
-    @Value("${spring.cloud.nacos.discovery.instance-id}")
-    private String instanceId;
 
     // 实例间传递消息调用
     private WebClient instanceWebClient;
@@ -88,7 +82,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // 维护本实例持有的 sid，用于 @PreDestroy 批量清理
     private final Set<String> localSids = ConcurrentHashMap.newKeySet();
 
-
+    private String instanceId;
 
     @Autowired
     private StringRedisTemplate redisTemplate;
@@ -121,6 +115,12 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     @PostConstruct
     public void init() {
+        this.instanceId = generateInstanceId();
+        log.info("[Init] 实例ID生成: {}", this.instanceId);
+
+        // 注冊到redis中
+        registerInstanceAddress();
+
         // 前端agent流，长连接，大超时
         this.agentWebClient = WebClient.builder().baseUrl(agentServiceUrl)
             .clientConnector(new ReactorClientHttpConnector(
@@ -130,31 +130,49 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             ))
             .build();
 
-        // 实例间回调，短平快
-        ConnectionProvider callbackProvider = ConnectionProvider.builder("callback-pool")
-            .maxConnections(100)
-            .pendingAcquireMaxCount(500)
-            .pendingAcquireTimeout(Duration.ofSeconds(3))
-            .build();
-
-        HttpClient callbackHttpClient = HttpClient.create(callbackProvider)
-            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000)
-            .responseTimeout(Duration.ofSeconds(5));
 
         // 实例间调用 webclient
         this.instanceWebClient = WebClient.builder()
-            .clientConnector(new ReactorClientHttpConnector(callbackHttpClient))
+            .clientConnector(new ReactorClientHttpConnector(
+                HttpClient.create()
+                    .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
+                    .responseTimeout(Duration.ofSeconds(10))
+            ))
             .build();
 
-        // 启动后延迟 5 秒，等 Nacos 注册完成，然后查自己的真实 instanceId
-        new Thread(() -> {
-            try {
-                Thread.sleep(5000);
-                refreshSelfInstanceId();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+    }
+
+    /**
+     * 生成实例专属id
+     * @return
+     */
+    private String generateInstanceId() {
+        String envId = System.getenv("INSTANCE_ID");
+        if (envId != null && !envId.isBlank()) {
+            return envId;
+        }
+        return UUID.randomUUID().toString();
+    }
+
+    /**
+     * 实例注册上redis
+     */
+    private void registerInstanceAddress() {
+        try {
+            String host = InetAddress.getLocalHost().getHostAddress();
+            if ("127.0.0.1".equals(host) || "0.0.0.0".equals(host)) {
+                host = "localhost";
             }
-        }).start();
+            String address = host + ":" + serverPort;
+            redisTemplate.opsForValue().set(
+                "videomind:instance:address:" + instanceId,
+                address,
+                Duration.ofSeconds(30)
+            );
+            log.info("[Init] 实例地址注册: {} -> {}", instanceId, address);
+        } catch (Exception e) {
+            log.error("[Init] 注册实例地址失败", e);
+        }
     }
 
     /**
@@ -1335,13 +1353,33 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         );
     }
 
-    private ServiceInstance findInstance(String instanceId) {
-        List<ServiceInstance> instances = discoveryClient.getInstances("video-mind-java");
-        if (instances == null || instances.isEmpty()) return null;
-        return instances.stream()
-            .filter(i -> instanceId.equals(i.getInstanceId()))
-            .findFirst()
-            .orElse(null);
+    private ServiceInstance findInstance(String targetInstanceId) {
+        if (targetInstanceId == null || targetInstanceId.isBlank()) {
+            return null;
+        }
+        String address = redisTemplate.opsForValue()
+            .get("videomind:instance:address:" + targetInstanceId);
+        if (address == null) {
+            log.warn("[FindInstance] 找不到实例地址: {}", targetInstanceId);
+            return null;
+        }
+        String[] parts = address.split(":");
+        if (parts.length != 2) {
+            log.error("[FindInstance] 地址格式非法: {}", address);
+            return null;
+        }
+        try {
+            return new DefaultServiceInstance(
+                targetInstanceId,
+                "video-mind-java",
+                parts[0],
+                Integer.parseInt(parts[1]),
+                false
+            );
+        } catch (Exception e) {
+            log.error("[FindInstance] 解析地址失败: {}", address, e);
+            return null;
+        }
     }
 
     @Override
@@ -1360,42 +1398,32 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         pushError(sid, message);
     }
 
-    private void refreshSelfInstanceId() {
-        try {
-            String ip = InetAddress.getLocalHost().getHostAddress();
-            List<ServiceInstance> instances = discoveryClient.getInstances("video-mind-java");
-            if (instances == null || instances.isEmpty()) {
-                log.warn("[Nacos] 无法获取服务实例列表");
-                return;
-            }
-
-            for (ServiceInstance inst : instances) {
-                if (ip.equals(inst.getHost()) && serverPort == inst.getPort()) {
-                    this.instanceId = inst.getInstanceId();
-                    log.info("[Nacos] 对齐成功，selfInstanceId={}", this.instanceId);
-                    return;
-                }
-            }
-            log.warn("[Nacos] 未找到匹配本机({}:{})的实例", ip, serverPort);
-        } catch (Exception e) {
-            log.error("[Nacos] 刷新 instanceId 失败", e);
-        }
-    }
-
     /**
      * 心跳机制，每10s向redis中注册心跳，过期时间30s
      * 如果心跳停了（redis中数据过期），则认为实例死亡
      */
     @Scheduled(initialDelay = 10_000, fixedRate = 10_000)
-    public void heartbeat(){
-        try{
+    public void heartbeat() {
+        try {
+            // 1. 刷新存活标记
             redisTemplate.opsForValue().set(
                 "videomind:instance:alive:" + instanceId,
                 String.valueOf(System.currentTimeMillis()),
                 Duration.ofSeconds(30)
             );
-        } catch (Exception e){
-            log.error("[Hearbeat] 刷新失败", e);
+            // 2. 刷新地址（防止 TTL 过期导致其他实例找不到）
+            String host = InetAddress.getLocalHost().getHostAddress();
+            if ("127.0.0.1".equals(host) || "0.0.0.0".equals(host)) {
+                host = "localhost";
+            }
+            String address = host + ":" + serverPort;
+            redisTemplate.opsForValue().set(
+                "videomind:instance:address:" + instanceId,
+                address,
+                Duration.ofSeconds(30)
+            );
+        } catch (Exception e) {
+            log.error("[Heartbeat] 刷新失败", e);
         }
     }
 
@@ -1426,7 +1454,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @PreDestroy
     public void onDestroy() {
         try {
+            // 1. 删除存活标记
             redisTemplate.delete("videomind:instance:alive:" + instanceId);
+            // 2. 删除地址映射（其他实例不再能找到我）
+            redisTemplate.delete("videomind:instance:address:" + instanceId);
+            // 3. 批量清理本实例持有的 sid owner 映射
             if (!localSids.isEmpty()) {
                 for (String sid : localSids) {
                     redisTemplate.delete("videomind:sse:owner:" + sid);
