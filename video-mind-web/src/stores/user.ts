@@ -1,3 +1,6 @@
+/**
+ * 持久化层，把关键的属性放在这里，可供全局组件拿到
+ */
 import {defineStore} from "pinia";
 import { ref, computed} from "vue";
 

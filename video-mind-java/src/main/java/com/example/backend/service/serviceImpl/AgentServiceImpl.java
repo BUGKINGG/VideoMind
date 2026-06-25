@@ -726,6 +726,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         if (line == null || line.isEmpty()) return;
                         // 保活注释：不处理，但检查业务层假死
                         if (line.startsWith(":ping")) {
+                            pushChunk(sid, "");
                             Long lastBiz = lastBusinessDataTime.get(sid);
                             if (lastBiz != null && System.currentTimeMillis() - lastBiz > 25000) {
                                 // 25秒没有业务数据，只有ping，认为Agent假死

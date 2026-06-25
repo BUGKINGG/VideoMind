@@ -1,906 +1,174 @@
 <template>
   <div class="app-container">
-    <!-- 左侧边栏 -->
-    <aside class="sidebar">
-      <div class="profile-section">
-        <div class="profile-card">
-          <div class="avatar">{{ userInitials }}</div>
-          <div class="profile-info">
-            <div class="profile-name">{{ userName }}</div>
-            <div class="profile-uid">UID: {{ userUid }}</div>
+    <Sidebar
+        :user-name="userName"
+        :user-uid="userUid"
+        :history-list="history.list"
+        :active-history-id="history.activeId"
+        @turn-to-options="turnToOptions"
+        @select-history="handleSelectHistory"
+    />
 
-          </div>
-          <button class="option-btn" @click="turnToOptions">设置</button>
-        </div>
-      </div>
-
-      <div class="history-section">
-        <div class="history-title">历史记录</div>
-        <div class="history-list">
-          <div
-              v-for="(item, index) in historyList"
-              :key="item.id"
-              class="history-item"
-              :class="{ active: activeHistoryId === item.id }"
-              @click="selectHistory(item.id)"
-          >
-            <div class="history-icon">🎬</div>
-            <div class="history-meta">
-              <div class="history-video-title">{{ item.title }}</div>
-              <div class="history-video-time">{{ item.time }}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </aside>
-
-    <!-- 右侧主区域 -->
     <main class="main-content">
-      <!-- 视图1：上传界面 -->
-      <div v-if="currentView === 'upload'" class="upload-view">
-        <div class="upload-card">
-          <div class="upload-title">开始视频学习</div>
-          <div class="upload-subtitle">
-            上传本地视频或粘贴视频链接，AI 将自动生成结构化总结
-          </div>
+      <UploadView
+          v-if="currentView === 'upload'"
+          v-model:video-url="videoUrl"
+          :is-loading="summary.isLoading"
+          :confirm-text="summary.confirmText"
+          @start="handleStartSummary"
+      />
 
-          <div
-              class="upload-zone"
-              @click="triggerFileSelect"
-              @dragover.prevent
-              @drop.prevent="handleDrop"
-          >
-            <div class="upload-zone-icon">📁</div>
-            <div class="upload-zone-text">
-              {{ isDragging ? '松开以上传视频' : '点击上传或拖拽视频到此处' }}
-            </div>
-            <div class="upload-zone-hint">
-              支持 MP4, MKV, AVI, WebM 等格式
-            </div>
-          </div>
+      <ChatView
+          v-else-if="currentView === 'chat'"
+          :messages="messages"
+          :current-video-title="summary.currentVideoTitle"
+          :subtitle-count="summary.subtitleCount"
+          :summary-stage="summary.stage"
+          :is-process="chat.isProcess"
+          @back="backToUpload"
+          @send="handleSendMessage"
+      />
 
-          <div class="input-row">
-            <button class="file-btn" @click="triggerFileSelect">
-              📎 选择文件
-            </button>
-            <input
-                ref="fileInput"
-                type="file"
-                accept="video/*"
-                style="display: none"
-                @change="handleFileChange"
-            />
-            <input
-                v-model="videoUrl"
-                type="text"
-                class="url-input"
-                placeholder="粘贴视频 URL 链接 (B站/YouTube/...)"
-            />
-          </div>
+      <OptionsView
+          v-else-if="currentView === 'options'"
+          @back="turnBack"
+          @show-cookie="showCookieModal = true"
+          @show-about="showAboutModal = true"
+      />
 
-          <button class="confirm-btn" @click="startSummary" :disabled="isLoading" :class="{'loading': isLoading}">
-             {{ confirm_text }}
-          </button>
+      <CookieModal
+          v-model="showCookieModal"
+          v-model:cookie-value="cookieValue"
+          @save="handleSaveCookie"
+      />
 
-          <div class="feature-tags">
-            <span class="tag"> 视频内容提取</span>
-            <span class="tag"> AI 结构化总结</span>
-            <span class="tag"> 对话学习助手</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 视图2：AI 聊天界面 -->
-      <div v-else-if="currentView === 'chat'" class="chat-view">
-        <div class="chat-header">
-          <div class="chat-header-left">
-            <div class="chat-header-icon">🎬</div>
-            <div class="chat-header-info">
-              <h3>{{ currentVideoTitle }}</h3>
-              <p>{{ headerStatusText }}</p>
-            </div>
-          </div>
-          <button class="back-btn" @click="backToUpload">← 返回上传</button>
-        </div>
-
-        <div class="chat-messages" ref="messagesContainer">
-  <div
-      v-for="(msg, index) in messages"
-      :key="msg.id"
-      class="message"
-      :class="msg.role"
-  >
-    <div class="message-avatar">
-      {{ msg.role === 'ai' ? 'AI' : '我' }}
-    </div>
-    <div class="message-content">
-      <!-- AI 占位消息：动态省略号 -->
-      <div v-if="msg.isPlaceholder" class="placeholder-message">
-        <div class="placeholder-main">{{ msg.placeholderType === 'chat' ? getChatPlaceholderText() : getSummaryPlaceholderText() }}</div>
-      </div>
-      <!-- AI 消息：v-html 渲染 Markdown 转成的 HTML -->
-      <div v-else-if="msg.role === 'ai'" class="markdown-body" v-html="msg.content"></div>
-      <!-- 用户消息：纯文本，防止 XSS -->
-      <div v-else>{{ msg.content }}</div>
-    </div>
-  </div>
-</div>
-
-        <div class="chat-input-area">
-          <div class="chat-input-wrapper">
-            <textarea
-                v-model="inputMessage"
-                class="chat-input"
-                rows="1"
-                placeholder="询问关于视频的任何问题，或要求 AI 截取特定时间戳分析..."
-                @input="autoResize"
-                @keydown.enter.prevent="sendMessage"
-            ></textarea>
-            <button class="send-btn" @click="sendMessage" :disabled="isProcess">➤</button>
-          </div>
-        </div>
-      </div>
-
-      <!--                视图三：设置界面            -->
-      <div v-else-if="currentView === 'options'" class="options-view">
-        <div class="options-header">
-          <h2>设置</h2>
-          <button class="back-btn" @click="turnBack">← 返回</button>
-        </div>
-        <div class="options-body">
-          <div class="option-item" @click="showCookieModal = true">
-            <div class="option-icon">🍪</div>
-            <div class="option-text">
-              <div class="option-title">绑定 / 修改 Cookie</div>
-              <div class="option-desc">用于获取视频平台的字幕和元数据</div>
-            </div>
-            <div class="option-arrow">›</div>
-          </div>
-          <div class="option-item" @click="showAboutModal = true">
-            <div class="option-icon">ℹ️</div>
-            <div class="option-text">
-              <div class="option-title">关于 VideoMind</div>
-              <div class="option-desc">版本信息、开源协议与致谢</div>
-            </div>
-            <div class="option-arrow">›</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Cookie 弹窗 -->
-      <div v-if="showCookieModal" class="modal-overlay" @click.self="showCookieModal = false">
-        <div class="modal-card">
-          <h3>绑定 Cookie</h3>
-          <p class="modal-hint">粘贴你从浏览器开发者工具中复制的 Cookie 字符串</p>
-          <textarea v-model="cookieValue" class="modal-textarea" rows="4" placeholder="例如: SESSDATA=xxx; bili_jct=yyy..."></textarea>
-          <div class="modal-actions">
-            <button class="modal-btn secondary" @click="showCookieModal = false">取消</button>
-            <button class="modal-btn primary" @click="saveCookie">保存</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 关于弹窗 -->
-      <div v-if="showAboutModal" class="modal-overlay" @click.self="showAboutModal = false">
-        <div class="modal-card">
-          <h3>关于 VideoMind</h3>
-          <div class="about-content">
-            <p><strong>VideoMind</strong> — 视频学习总结助手</p>
-            <p>版本：v0.1.0</p>
-            <p>基于 AI Agent 技术，支持字幕提取、结构化总结与多模态时间戳分析。</p>
-            <p>如有疑问请联系：</p>
-            <p>麦生：1062362280@qq.com</p>
-            <p>麦生：1924153440@qq.com</p>
-          </div>
-          <div class="modal-actions">
-            <button class="modal-btn primary" @click="showAboutModal = false">知道了</button>
-          </div>
-        </div>
-      </div>
-
+      <AboutModal v-model="showAboutModal" />
     </main>
   </div>
 </template>
 
-<script setup>
-import { ref, computed, nextTick } from 'vue'
-import {useUserStore} from "../stores/user.ts";
-import request from '../utils/request'
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue'
+import { useUserStore } from '@/stores/user'
+import Sidebar from "@/components/Sidebar.vue";
+import UploadView from '@/components/UploadView.vue'
+import ChatView from '@/components/ChatView.vue'
+import OptionsView from '@/components/OptionsView.vue'
+import CookieModal from '@/components/CookieModal.vue'
+import AboutModal from '@/components/AboutModal.vue'
+import { useHistory } from '@/composables/useHistory'
+import { useSummary } from '@/composables/useSummary'
+import { useChat } from '@/composables/useChat'
+import { renderMarkdown } from '@/utils/markdown'
+import request from '@/utils/request'
+import type { Message } from '@/types/message'
 
 // ========== 用户数据 ==========
 const userStore = useUserStore()
-const userName = computed(() => userStore.username || "default name")
+const userName = computed(() => userStore.username || 'default name')
 const userUid = ref('19241001')
-const confirm_text = ref('开始总结')
-const isLoading = ref(false)
-const isProcess = ref(false)
-
-// 占位消息动态省略号相关
-const placeholderDots = ref(1)
-let placeholderTimer = null
-
-/**
- * 启动占位消息省略号动画：1 -> 2 -> 3 -> 1 循环
- * 让用户感知页面仍在运行，没有被卡死
- */
-function startPlaceholderAnimation() {
-  stopPlaceholderAnimation()
-  placeholderDots.value = 1
-  placeholderTimer = setInterval(() => {
-    placeholderDots.value = placeholderDots.value % 3 + 1
-  }, 500)
-}
-
-/**
- * 停止占位消息省略号动画
- */
-function stopPlaceholderAnimation() {
-  if (placeholderTimer) {
-    clearInterval(placeholderTimer)
-    placeholderTimer = null
-  }
-}
-
-/**
- * 占位消息文本：动态省略号
- */
-function getSummaryPlaceholderText() {
-  return '正在解析视频内容并生成总结' + '。'.repeat(placeholderDots.value)
-}
-
-function getChatPlaceholderText() {
-  return '思考中' + '。'.repeat(placeholderDots.value)
-}
-
-const userInitials = computed(() => {
-  return userName.value
-      .split(' ')
-      .map((w) => w[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2)
-})
-
-
 
 // ========== 历史记录 ==========
-const activeHistoryId = ref(null)
-const historyList = ref([ ])
+const history = useHistory()
 
-/**
- * 格式化返回时间
- * @param timeStr
- * @returns {string}
- */
-function formatTime(timeStr) {
-  const date = new Date(timeStr)
-  const now = new Date()
-  const diff = Math.floor((now - date)/1000)
-
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
-  if (diff < 604800) return `${Math.floor(diff / 86400)}天前`
-  return date.toLocaleDateString()
-}
-
-/**
- * 获得历史记录列表
- * @returns {Promise<void>}
- */
-async function loadHistory() {
-  try {
-    const res = await request.get('/user/conversation/list')
-    if(res.code === 200) {
-      /**
-       * 后端返回JSON格式为
-       * {
-       *   "code": 200,
-       *   "data": {
-       *     "id": 1,
-       *     "title": "LangChain Agent 深度解析...",
-       *     "summary": "## 1. 一句话总结\n...",
-       *     "subtitleCount": 154,
-       *     "url": "https://www.bilibili.com/video/BV1xx",
-       *     "part": 1,
-       *     "status": 1,
-       *     "createTime": "2026-06-10T10:30:00"
-       *   }
-       * }
-       */
-      historyList.value = res.data.map(item => ({
-        id: item.id,
-        title: item.title || '未命名视频',
-        time: formatTime(item.createdAt) || '未知时间',
-        status: item.status
-      }))
-    }
-  } catch (e){
-    console.log("历史记录加载失败", e)
-  }
-}
-
-
-async function selectHistory(id) {
-  activeHistoryId.value = id
-  try {
-    const res = await request.get(`user/conversation/${id}`)
-    if(res.code !== 200){
-      alert("加载失败：" + res.message)
-      return
-    }
-
-    const data = res.data
-
-    if (data.status === 0 ) {
-      alert("视频还在处理中，请稍后")
-      return
-    }
-
-    if (data.status === 2) {
-      alert('视频解析失败，请重新提交')
-      return
-    }
-
-    // 切到聊天视图并回填数据
-    currentView.value = 'chat'
-    currentConversationId.value = id
-    currentVideoId.value = data.videoId || null
-    currentVideoTitle.value = data.title || '未命名视频'
-    subtitleCount.value = data.subtitleCount || 0
-    summaryStage.value = 'done'
-    videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
-
-    if(data.messages && data.messages.length > 0){
-      messages.value = data.messages.map((msg, idx) => ({
-        id: (msg.id || `hist_${idx}_${Date.now()}`),
-        role: msg.role,
-        content: msg.role ===  'ai' ? renderMarkdown(msg.content) : msg.content
-      }))
-    }else {
-      messages.value = [{
-        id: Date.now() + '_summary',
-        role: 'ai',
-        content: renderMarkdown(data.summary || '暂无总结')
-      }]
-    }
-
-    nextTick(() => scrollToBottom())
-  }catch (e) {
-    console.error("加载记录失败", e)
-    alert('加载失败')
-  }
-}
-
-loadHistory()
+// ========== 总结 & 聊天 ==========
+const messages = ref<Message[]>([])
+const summary = useSummary(messages)
+const chat = useChat(messages)
 
 // ========== 视图切换 ==========
-const currentView = ref('upload') // 'upload' | 'chat'
+const currentView = ref<'upload' | 'chat' | 'options'>('upload')
+const historyView = ref<'upload' | 'chat'>('upload')
 const videoUrl = ref('')
-const currentVideoTitle = ref('')
-const subtitleCount = ref(0)
-const currentConversationId = ref(null)
-const currentVideoId = ref(null)
 
-// 总结流程的阶段：parsing（解析字幕） / summarizing（生成总结） / done（总结完成）
-// 用于控制顶部 header 的状态文字，避免总结完成后仍显示"正在分析视频内容"
-const summaryStage = ref('parsing')
-
-/**
- * 顶部 header 状态文字，根据当前处理阶段动态变化
- */
-const headerStatusText = computed(() => {
-  if (summaryStage.value === 'done') {
-    return `总结完成 • 已提取 ${subtitleCount.value} 条字幕片段`
-  }
-  if (summaryStage.value === 'summarizing') {
-    return `正在生成总结 • 已提取 ${subtitleCount.value} 条字幕片段`
-  }
-  return `正在分析视频内容 • 已提取 ${subtitleCount.value} 条字幕片段`
-})
-
-const historyView = ref('')
+// ========== 弹窗 ==========
 const showCookieModal = ref(false)
 const showAboutModal = ref(false)
 const cookieValue = ref('')
 
-import { marked } from 'marked'
-
-// 配置 marked：支持换行转 <br>，禁用标题 ID 减少 DOM 抖动
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-  headerIds: false,
-  mangle: false
+// 监听 SSE 完成（isLoading 从 true 变为 false），自动刷新历史记录
+watch(() => summary.isLoading, (newVal, oldVal) => {
+  if (oldVal === true && newVal === false) {
+    history.load()
+  }
 })
 
-// 渲染 Markdown 为 HTML
-function renderMarkdown(text) {
-  return marked.parse(text || '')
+// ========== 操作 ==========
+function turnToOptions() {
+  historyView.value = currentView.value === 'options' ? 'upload' : currentView.value
+  currentView.value = 'options'
 }
 
-// 解析单条 SSE 消息，内部 try-catch 防止单条解析失败中断整个流
-function processSseChunk(chunk) {
-  if (!chunk.trim()) return
-  try {
-    const lines = chunk.split('\n')
-    let eventName = 'message'
-    let dataStr = ''
-
-    for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim()
-      } else if (line.startsWith('data:')) {
-        dataStr = line.slice(5).trim()
-      }
-    }
-
-    if (!dataStr) return
-    const data = JSON.parse(dataStr)
-    console.log('[SSE] 收到事件:', eventName, data)
-
-    if (eventName === 'message' && data.type === 'chunk') {
-      if (!data.content) return  // 忽略空心跳
-    }
-
-    if (eventName === 'connect') {
-      console.log('SSE 已连接')
-    }
-    else if (eventName === 'message' && data.type === 'metadata') {
-      // 字幕解析完成，提前显示标题和字幕数量
-      currentVideoTitle.value = data.title || currentVideoTitle.value
-      subtitleCount.value = data.subtitleCount || 0
-      summaryStage.value = 'summarizing'
-    }
-    else if (eventName === 'message' && data.type === 'chunk') {
-      // 流式内容片段：替换占位消息或更新流式消息
-      const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
-      if (placeholderIndex !== -1) {
-        // 第一次收到内容，停止占位动画并替换占位消息
-        stopPlaceholderAnimation()
-        messages.value[placeholderIndex] = {
-          role: 'ai',
-          // 流式阶段用纯文本，避免 markdown 解析不完整
-          content: renderMarkdown(data.content),
-          rawContent: data.content,
-          isStreaming: true
-        }
-      } else {
-        // 更新正在流式的消息
-        const idx = messages.value.findIndex(m => m.isStreaming)
-        if (idx !== -1) {
-          const raw = messages.value[idx].rawContent + data.content
-          messages.value[idx].rawContent = raw
-          messages.value[idx].content = renderMarkdown(raw)
-        }
-      }
-      scrollToBottom()
-    }
-    else if (eventName === 'message' && data.type === 'done') {
-      // 流式完成：更新标题、字幕数，渲染最终 markdown
-      stopPlaceholderAnimation()
-      currentVideoTitle.value = data.title
-      subtitleCount.value = data.subtitleCount || 0
-      currentConversationId.value = data.conversationId || null
-      currentVideoId.value = data.videoId || null
-      summaryStage.value = 'done'
-      const idx = messages.value.findIndex(m => m.isStreaming)
-      if (idx !== -1) {
-        const raw = messages.value[idx].rawContent || ''
-        messages.value[idx] = {
-          role: 'ai',
-          content: renderMarkdown(raw)
-        }
-      }
-      isLoading.value = false
-      confirm_text.value = '开始总结'
-      return {type: 'done'}
-    }
-    else if (eventName === 'error') {
-      stopPlaceholderAnimation()
-      const msg = data.message || '未知错误'
-      const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
-      if (placeholderIndex !== -1) {
-        messages.value[placeholderIndex] = {
-          role: 'ai',
-          content: '处理失败: ' + msg
-        }
-      } else {
-        alert('处理失败: ' + msg)
-      }
-      isLoading.value = false
-      confirm_text.value = '开始总结'
-      return { type: 'error' }
-    }
-  } catch (e) {
-    // 单条消息格式不对不中断整个流，打印调试
-    console.error('[SSE] 单条消息解析失败:', e, '原始数据:', chunk)
-  }
-
-}
-
-/**
- * 开始总结（SSE 异步版）
- * 流程：
- * 1. axios POST 提交任务，后端立即返回 sessionId（不阻塞）
- * 2. 使用 fetch + ReadableStream 建立 SSE 连接，通过 Headers 携带 token
- * 3. 实时监听后端推送，处理完成后立即展示结果
- *
- * 关键修复：done=true 时，buffer 中可能残留最后一条 SSE 消息，必须处理完再 break
- */
-async function startSummary() {
-  if (!videoUrl.value) {
-    alert('请先上传视频或输入链接')
-    return
-  }
-  if (!userStore.cookie) {
-    alert("请先在设置里设置cookie")
-    return
-  }
-  // 防重入：如果正在处理，直接忽略
-  if (isLoading.value) return
-
-  let isStreamCompleted = false
-
-  try {
-    isLoading.value = true
-    confirm_text.value = '解析中...'
-
-    // 提交任务
-    const res = await request.post('/agent/summary', {
-      url: videoUrl.value,
-      cookie: userStore.cookie
-    })
-
-    // 后端返回 http 单次连接的消息
-    // 如果status=1，那么证明命中了缓存
-    // 如果不是，则sid肯定不为空，启动sse进行监听
-    const { sessionId, status } = res.data
-
-    // 命中缓存，直接展示
-    if (status === 1) {
-      currentVideoTitle.value = res.data.title
-      subtitleCount.value = res.data.subtitleCount || 0
-      currentConversationId.value = res.data.conversationId || null
-      currentVideoId.value = res.data.videoId || null
-      summaryStage.value = 'done'
-      messages.value = [{
-        id: Date.now() + '_summary',
-        role: 'ai',
-        content: renderMarkdown(res.data.summary || '')
-      }]
-      currentView.value = 'chat'
-      isLoading.value = false
-      confirm_text.value = '开始总结'
-      isStreamCompleted = true
-      return
-    }
-
-    // 非缓存：立刻切换到 chat 视图，显示占位消息
-    currentView.value = 'chat'
-    currentVideoTitle.value = videoUrl.value
-    subtitleCount.value = 0
-    summaryStage.value = 'parsing'
-    startPlaceholderAnimation()
-    messages.value = [{
-      id: Date.now() + '_placeholder',
-      role: 'ai',
-      isPlaceholder: true,
-      placeholderType: 'summary'
-    }]
-
-    // 建立 SSE 连接监听流式结果
-    // 当 fetch 收到后端返回的响应头时即可放行
-    // 当后端发起emitter.complete时，http连接主动关闭
-    // 在连接时，二进制字节流数据持续传输
-    // reader接收二进制字节流，decoder将其译码
-    const response = await fetch(`/agent/summary/stream?sid=${sessionId}`, {
-      headers: { 'token': userStore.token }
-    })
-    if (!response.ok) throw new Error(`SSE 连接失败: ${response.status}`)
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    // buffer 存放完整的被译码后的文本数据
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-
-      // 流结束时，把 buffer 里剩余所有消息全部处理完再 break
-      if (done) {
-        const remaining = buffer.split('\n\n')
-        for (const chunk of remaining) {
-          const result = processSseChunk(chunk)
-          if(result?.type === 'done' || result?.type === 'error'){
-            isStreamCompleted = true
-          }
-        }
-        break
-      }
-
-      buffer += decoder.decode(value, { stream: true })
-      /**
-       * SSE规定，每条信息以连续两个\n\n，如下：
-       *
-       * event: message
-       * data: {"type":"chunk","content":"你好"}
-       *
-       * event: message
-       * data: {"type":"done","summary":"..."}
-       *
-       * event: error
-       * data: {"message":"失败"}
-       *
-       *
-       * 每个chunk即是一条SSE消息
-       */
-      const chunks = buffer.split('\n\n')
-      /**
-       * 因为字节流解码不是连续的，比如说对于一条SSE消息：
-       * event: message
-       * data: {"type":"chunk","content":"你好"}
-       *
-       * 实际上每次read得到的是
-       * 1:
-       * event: mes
-       * 2:
-       * sage\ndata
-       * 3:
-       * : {"type":"c
-       * 4:
-       * hunk","content":"你好"}\n\n
-       *
-       * pop()可以把chunks里最后的放回buffer，因为它可能是下一个SSE的内容，还不完整。
-       */
-      buffer = chunks.pop() || ''
-
-      for (const chunk of chunks) {
-        const result = processSseChunk(chunk)
-        if(result?.type === 'done' || result?.type === 'error'){
-          isStreamCompleted = true
-        }
-      }
-    }
-
-    if (!isStreamCompleted) {
-      alert('连接意外中断，视频可能已解析完成，请刷新页面查看历史记录')
-    }
-
-  } catch (error) {
-    stopPlaceholderAnimation()
-    console.error('总结流程异常:', error)
-    alert('请求失败: ' + (error.message || '请检查网络或登录状态'))
-  } finally {
-    // 只有按钮还在加载状态时才重置（防止成功回调已经重置过）
-    if (isLoading.value) {
-      isLoading.value = false
-      confirm_text.value = '开始总结'
-    }
-    // 兜底：确保占位动画停止，避免内存泄漏
-    stopPlaceholderAnimation()
-
-    loadHistory()
-  }
+function turnBack() {
+  currentView.value = historyView.value
 }
 
 function backToUpload() {
   currentView.value = 'upload'
   videoUrl.value = ''
-  currentConversationId.value = null
-  currentVideoId.value = null
-  messages.value = [...defaultMessages]
+  messages.value = []
+  summary.currentConversationId = null
+  summary.currentVideoId = null
 }
 
-async function saveCookie() {
-  if(!cookieValue){
-    alert("请输入cookie！")
+async function handleStartSummary() {
+  const result = await summary.start(videoUrl.value, userStore.cookie, userStore.token)
+  if(result === 'cached' || result === 'streaming') {
+    currentView.value = 'chat'
+  }
+}
+
+async function handleSendMessage(text: string) {
+  await chat.send(text, summary.currentConversationId, userStore.token)
+  history.load()
+}
+
+async function handleSelectHistory(id: number) {
+  history.activeId = id
+  const data = await history.loadDetail(id)
+  if (!data) return
+
+  currentView.value = 'chat'
+  summary.currentConversationId = data.id
+  summary.currentVideoId = data.videoId || null
+  summary.currentVideoTitle = data.title || '未命名视频'
+  summary.subtitleCount = data.subtitleCount || 0
+  summary.stage = 'done'
+  videoUrl.value = data.url || ''
+
+  if (data.messages && data.messages.length > 0) {
+    messages.value = data.messages.map((msg: any, idx: number) => ({
+      id: msg.id || `hist_${idx}_${Date.now()}`,
+      role: msg.role,
+      content: msg.role === 'ai' ? renderMarkdown(msg.content) : msg.content
+    }))
+  } else {
+    messages.value = [{
+      id: Date.now() + '_summary',
+      role: 'ai',
+      content: renderMarkdown(data.summary || '暂无总结')
+    }]
+  }
+}
+
+async function handleSaveCookie() {
+  if (!cookieValue.value) {
+    alert('请输入cookie！')
     return
   }
-
-  try{
-    const res = await request.post("/user/cookie", {
-      cookie: cookieValue.value
-    })
-
+  try {
+    await request.post('/user/cookie', { cookie: cookieValue.value })
     userStore.updateCookie(cookieValue.value)
-
-    console.log('保存 Cookie:', cookieValue.value)
     showCookieModal.value = false
     alert('Cookie 已保存')
-  } catch (error){
+  } catch (error) {
     console.error(error)
   }
 }
 
-function turnToOptions() {
-  historyView.value = currentView.value
-  currentView.value = 'options'
-}
-
-function turnBack (){
-  currentView.value = historyView.value
-}
-
-// ========== 文件上传 ==========
-const fileInput = ref(null)
-const isDragging = ref(false)
-
-function triggerFileSelect() {
-  fileInput.value?.click()
-}
-
-function handleFileChange(e) {
-  const file = e.target.files[0]
-  if (file) {
-    videoUrl.value = file.name
-    // TODO: 实际上传文件到后端
-  }
-}
-
-function handleDrop(e) {
-  isDragging.value = false
-  const files = e.dataTransfer.files
-  if (files.length > 0) {
-    videoUrl.value = files[0].name
-    // TODO: 处理拖拽上传
-  }
-}
-
-// ========== 聊天消息 ==========
-const messagesContainer = ref(null)
-const inputMessage = ref('')
-const defaultMessages = []
-const messages = ref([])
-
-async function sendMessage() {
-  const text = inputMessage.value.trim()
-  if (!text) return
-  if(isProcess.value) return
-
-  isProcess.value = true
-
-  // 1. 用户消息
-  const userId = Date.now() + '_user'
-  messages.value.push({ id: userId, role: 'user', content: text })
-  inputMessage.value = ''
-  autoResize()
-  scrollToBottom()
-
-  // 2. AI 占位，记录固定索引
-  const aiIndex = messages.value.length
-  const aiId = Date.now() + '_ai'
-  messages.value.push({
-    id: aiId,
-    role: 'ai',
-    isPlaceholder: true,
-    placeholderType: 'chat'
-  })
-  startPlaceholderAnimation()
-  scrollToBottom()
-
-  try {
-    const res = await request.post('/agent/chat', {
-      conversationId: currentConversationId.value,
-      message: text
-    })
-    const { sessionId } = res.data
-
-    const response = await fetch(`/agent/chat/stream?sid=${sessionId}`, {
-      headers: { 'token': userStore.token }
-    })
-    if (!response.ok) throw new Error(`SSE ${response.status}`)
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) {
-        const remaining = buffer.split('\n\n')
-        for (const chunk of remaining) processChatChunk(chunk, aiIndex)
-        break
-      }
-      buffer += decoder.decode(value, { stream: true })
-      const chunks = buffer.split('\n\n')
-      buffer = chunks.pop() || ''
-      for (const chunk of chunks) processChatChunk(chunk, aiIndex)
-    }
-  } catch (error) {
-    stopPlaceholderAnimation()
-    console.error('发送失败:', error)
-    messages.value.splice(aiIndex, 1, { id: messages.value[aiIndex]?.id, role: 'ai', content: '发送失败，请重试' })
-  } finally {
-    stopPlaceholderAnimation()
-    isProcess.value = false
-  }
-}
-
-function processChatChunk(chunk, aiIndex) {
-  if (!chunk.trim()) return
-  try {
-    const lines = chunk.split('\n')
-    let eventName = 'message', dataStr = ''
-    for (const line of lines) {
-      if (line.startsWith('event:')) eventName = line.slice(6).trim()
-      else if (line.startsWith('data:')) dataStr = line.slice(5).trim()
-    }
-    if (!dataStr) return
-    const data = JSON.parse(dataStr)
-    console.log('[Chat SSE]', eventName, data)  // 调试用，确认收到数据
-
-    if (eventName === 'message' && data.type === 'chunk') {
-      const current = messages.value[aiIndex]
-      if (current.isPlaceholder) {
-        // 第一个 token：停止占位动画，替换为正式流式消息
-        stopPlaceholderAnimation()
-        messages.value.splice(aiIndex, 1, {
-          id: current.id,
-          role: 'ai',
-          content: renderMarkdown(data.content),
-          rawContent: data.content,
-          isStreaming: true
-        })
-      } else {
-        const raw = (current.rawContent || '') + data.content
-        messages.value.splice(aiIndex, 1, {
-          id: current.id,
-          role: 'ai',
-          content: renderMarkdown(raw),
-          rawContent: raw,
-          isStreaming: true
-        })
-      }
-      scrollToBottom()
-    }
-    else if (eventName === 'message' && data.type === 'done') {
-      stopPlaceholderAnimation()
-      const current = messages.value[aiIndex]
-      const raw = current.rawContent || ''
-      messages.value.splice(aiIndex, 1, {
-        id: current.id,
-        role: 'ai',
-        content: renderMarkdown(data.answer || raw)
-      })
-      loadHistory()
-    }
-    else if (eventName === 'error') {
-      stopPlaceholderAnimation()
-      messages.value.splice(aiIndex, 1, {
-        id: messages.value[aiIndex]?.id,
-        role: 'ai',
-        content: '出错: ' + (data.message || '未知错误')
-      })
-    }
-  } catch (e) {
-    console.error('解析 chat chunk 失败:', e, chunk)
-  }
-}
-
-
-
-function scrollToBottom() {
-  nextTick(() => {
-    const container = messagesContainer.value
-    if (container) {
-      container.scrollTop = container.scrollHeight
-    }
-  })
-}
-
-// ========== 输入框自适应高度 ==========
-function autoResize() {
-  nextTick(() => {
-    const textarea = document.querySelector('.chat-input')
-    if (textarea) {
-      textarea.style.height = 'auto'
-      textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px'
-    }
-  })
-}
+// 初始化
+history.load()
 </script>
-
 
 <style scoped>
 * {
@@ -922,8 +190,7 @@ function autoResize() {
   --text-muted: #94a3b8;
   --radius: 12px;
   --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1),
-  0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 }
 
 .app-container {
@@ -936,136 +203,6 @@ function autoResize() {
   overflow: hidden;
 }
 
-/* ========== 左侧边栏 ========== */
-.sidebar {
-  width: 350px;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.profile-section {
-  padding: 20px;
-  border-bottom: 1px solid var(--border);
-}
-
-.profile-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.avatar {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-weight: 600;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-.profile-info {
-  overflow: hidden;
-}
-
-.profile-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.profile-uid {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-.history-section {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 12px;
-}
-
-.history-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 0 8px 12px;
-}
-
-.history-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.history-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.history-item:hover {
-  background: #f1f5f9;
-}
-
-.history-item.active {
-  background: #eef2ff;
-}
-
-.history-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: #f1f5f9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.history-item.active .history-icon {
-  background: #c7d2fe;
-}
-
-.history-meta {
-  overflow: hidden;
-  flex: 1;
-}
-
-.history-video-title {
-  font-size: 13px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 500;
-}
-
-.history-video-time {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-/* ========== 右侧主区域 ========== */
 .main-content {
   flex: 1;
   display: flex;
@@ -1074,554 +211,7 @@ function autoResize() {
   position: relative;
 }
 
-/* --- 上传视图 --- */
-.upload-view {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  padding: 40px;
-}
-
-.upload-card {
-  background: var(--bg-chat);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 48px 40px;
-  width: 100%;
-  max-width: 640px;
-  box-shadow: var(--shadow-lg);
-  text-align: center;
-}
-
-.upload-title {
-  font-size: 22px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.upload-subtitle {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin-bottom: 32px;
-}
-
-.upload-zone {
-  border: 2px dashed #cbd5e1;
-  border-radius: var(--radius);
-  padding: 40px 24px;
-  margin-bottom: 24px;
-  transition: all 0.2s;
-  cursor: pointer;
-}
-
-.upload-zone:hover {
-  border-color: var(--primary);
-  background: #f8fafc;
-}
-
-.upload-zone-icon {
-  font-size: 40px;
-  margin-bottom: 12px;
-  opacity: 0.6;
-}
-
-.upload-zone-text {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-}
-
-.upload-zone-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.input-row {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-.url-input {
-  flex: 1;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.url-input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
-}
-
-.file-btn {
-  padding: 10px 18px;
-  border: 1px solid var(--border);
-  background: white;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-  color: var(--text-primary);
-}
-
-.file-btn:hover {
-  background: #f8fafc;
-  border-color: #cbd5e1;
-}
-
-.confirm-btn {
-  width: 100%;
-  padding: 12px 24px;
-  background: var(--primary);
-  color: #575555;
-  border-radius: 8px;
-  border-color: #c8ced9;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.confirm-btn:hover {
-  background: var(--primary-hover);
-}
-
-.feature-tags {
-  display: flex;
-  gap: 8px;
-  justify-content: center;
-  margin-top: 16px;
-}
-
-.tag {
-  font-size: 12px;
-  padding: 4px 10px;
-  background: #f1f5f9;
-  color: var(--text-secondary);
-  border-radius: 20px;
-  border: 1px solid var(--border);
-}
-
-/* --- 聊天视图 --- */
-.chat-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.chat-header {
-  padding: 16px 24px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-chat);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.chat-header-option {
-  justify-content: right;
-}
-
-.chat-header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.chat-header-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: #eef2ff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-}
-
-.chat-header-info h3 {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.chat-header-info p {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-.back-btn {
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  background: white;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--text-secondary);
-}
-
-.back-btn:hover {
-  background: #f8fafc;
-}
-
-.back-btn-option {
-  margin-right: 30px;
-}
-
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 24px;
-  background: var(--bg-main);
-}
-
-.message {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
-  max-width: 80%;
-}
-
-.message.user {
-  margin-left: auto;
-  flex-direction: row-reverse;
-}
-
-.message-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.message.ai .message-avatar {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-}
-
-.message.user .message-avatar {
-  background: #e2e8f0;
-  color: var(--text-secondary);
-}
-
-.message-content {
-  background: white;
-  padding: 16px 20px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  font-size: 18px;           /* 从 14px 放大 */
-  line-height: 1.8;          /* 从 1.6 放大 */
-  box-shadow: var(--shadow);
-  text-align: left;          /* 强制左对齐 */
-  width: 100%;
-  color: var(--text-primary);
-}
-
-/* 占位消息样式：主文字 + 提示文字 */
-.placeholder-message {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.placeholder-main {
-  font-size: 18px;
-  line-height: 1.8;
-  color: var(--text-primary);
-  white-space: pre-line;
-}
-
-.placeholder-hint {
-  font-size: 13px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.message.user .message-content {
-  background: #ffffff;
-  color: #1f2937;
-  border: 1px solid #e5e7eb;
-}
-
-:deep(.timestamp-badge) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: #fef3c7;
-  color: #92400e;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  margin: 0 4px;
-  cursor: pointer;
-}
-
-.chat-input-area {
-  padding: 16px 24px;
-  background: var(--bg-chat);
-  border-top: 1px solid var(--border);
-}
-
-.chat-input-wrapper {
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-  background: var(--bg-main);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 14px;
-}
-
-.chat-input {
-  flex: 1;
-  border: none;
-  background: transparent;
-  outline: none;
-  font-size: 14px;
-  resize: none;
-  max-height: 120px;
-  font-family: inherit;
-  line-height: 1.5;
-}
-
-.chat-input::placeholder {
-  color: var(--text-muted);
-}
-
-.send-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: black;
-  color: white;
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.2s;
-}
-
-.send-btn:enabled:hover {
-  background: #2d2d2d;
-}
-
-.send-btn:disabled {
-  background: #b41010;
-}
-
-.option-btn {
-  background: white;
-  border: none;
-  font-size: 15px;
-  color: #757474;
-  border-radius: 12px;
-  transition-duration: 0.2s;
-  margin-left: 50px;
-  width: 50px;
-  height: 30px;
-}
-
-.option-btn:hover{
-  background: #e8e5e5;
-}
-
-.option-btn:active{
-  transform: translateY(-3px);
-}
-
-.main-options {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 100px;
-  border: 2px solid #eaeaea;
-  border-radius: 8px;
-  box-shadow: 1px 1px 1px 1px #9ca3af ;
-  height: 600px;
-}
-
-.cookie-btn {
-  border-radius: 12px;
-  width: 300px;
-  height: 30px;
-  background: #ececec;
-}
-
-/* 设置按钮 */
-.settings-btn {
-  margin-left: auto;
-  background: none;
-  border: none;
-  font-size: 18px;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  transition: background 0.2s;
-}
-.settings-btn:hover {
-  background: #f1f5f9;
-}
-
-/* 设置视图 */
-.options-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background: #f8fafc;
-}
-.options-header {
-  padding: 16px 24px;
-  background: #ffffff;
-  border-bottom: 1px solid #e2e8f0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.options-header h2 {
-  font-size: 18px;
-  font-weight: 600;
-}
-.options-body {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.option-item {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 16px 18px;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-  margin-left: 80px;
-  margin-right: 80px;
-}
-.option-item:hover {
-  border-color: #cbd5e1;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08);
-}
-.option-icon {
-  font-size: 20px;
-}
-.option-text {
-  flex: 1;
-}
-.option-title {
-  font-size: 15px;
-  font-weight: 500;
-  color: #1e293b;
-}
-.option-desc {
-  font-size: 13px;
-  color: #94a3b8;
-  margin-top: 2px;
-}
-.option-arrow {
-  font-size: 18px;
-  color: #94a3b8;
-}
-
-/* 弹窗 */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-.modal-card {
-  background: #ffffff;
-  border-radius: 12px;
-  padding: 24px;
-  width: 100%;
-  max-width: 440px;
-  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
-}
-.modal-card h3 {
-  font-size: 17px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-.modal-hint {
-  font-size: 13px;
-  color: #64748b;
-  margin-bottom: 16px;
-}
-.modal-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 14px;
-  font-family: inherit;
-  resize: vertical;
-  outline: none;
-}
-.modal-textarea:focus {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
-}
-.about-content {
-  font-size: 14px;
-  line-height: 1.7;
-  color: #475569;
-  margin-bottom: 8px;
-}
-.about-content p {
-  margin-bottom: 8px;
-}
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 20px;
-}
-.modal-btn {
-  padding: 8px 18px;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: all 0.2s;
-}
-.modal-btn.primary {
-  background: #4f46e5;
-  color: white;
-  border-color: #4f46e5;
-}
-.modal-btn.primary:hover {
-  background: #4338ca;
-}
-.modal-btn.secondary {
-  background: #ffffff;
-  color: #64748b;
-  border-color: #e2e8f0;
-}
-.modal-btn.secondary:hover {
-  background: #f8fafc;
-}
-/* ========== Markdown 强制左对齐 + 字号保护 ========== */
+/* ========== Markdown 全局样式（v-html 穿透） ========== */
 :deep(.markdown-body),
 :deep(.markdown-body *) {
   text-align: left !important;
@@ -1634,7 +224,6 @@ function autoResize() {
   word-break: break-word;
 }
 
-/* 标题 */
 :deep(.markdown-body h1) {
   font-size: 18px;
   font-weight: 600;
@@ -1656,12 +245,10 @@ function autoResize() {
   margin: 16px 0 8px;
 }
 
-/* 段落 */
 :deep(.markdown-body p) {
   margin-bottom: 12px;
 }
 
-/* 列表 */
 :deep(.markdown-body ul),
 :deep(.markdown-body ol) {
   padding-left: 24px;
@@ -1680,13 +267,11 @@ function autoResize() {
   color: var(--primary);
 }
 
-/* 加粗 */
 :deep(.markdown-body strong) {
   font-weight: 600;
   color: var(--primary);
 }
 
-/* 代码块 */
 :deep(.markdown-body pre) {
   background: #f8fafc;
   border-radius: 8px;
@@ -1705,7 +290,6 @@ function autoResize() {
   padding: 0;
 }
 
-/* 行内代码 */
 :deep(.markdown-body code) {
   background: #eef2ff;
   padding: 2px 6px;
@@ -1715,7 +299,6 @@ function autoResize() {
   color: var(--primary);
 }
 
-/* 引用块 */
 :deep(.markdown-body blockquote) {
   margin: 12px 0;
   padding: 10px 16px;
@@ -1725,7 +308,6 @@ function autoResize() {
   color: var(--text-secondary);
 }
 
-/* 表格 */
 :deep(.markdown-body table) {
   width: 100%;
   border-collapse: collapse;
@@ -1745,14 +327,12 @@ function autoResize() {
   font-weight: 600;
 }
 
-/* 分隔线 */
 :deep(.markdown-body hr) {
   border: none;
   border-top: 1px solid var(--border);
   margin: 18px 0;
 }
 
-/* 链接 */
 :deep(.markdown-body a) {
   color: var(--primary);
   text-decoration: none;
@@ -1762,10 +342,23 @@ function autoResize() {
   text-decoration: underline;
 }
 
-/* 图片 */
 :deep(.markdown-body img) {
   max-width: 100%;
   border-radius: 8px;
   margin: 8px 0;
+}
+
+:deep(.timestamp-badge) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #fef3c7;
+  color: #92400e;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0 4px;
+  cursor: pointer;
 }
 </style>
