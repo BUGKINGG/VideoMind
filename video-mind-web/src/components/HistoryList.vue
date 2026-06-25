@@ -9,10 +9,16 @@
           :class="{ active: activeId === item.id }"
           @click="$emit('select', item.id)"
       >
-        <div class="history-icon">🎬</div>
+        <div class="history-icon">
+          <span v-if="item.status === 0" class="processing-spinner"></span>
+          <span v-else>🎬</span>
+        </div>
         <div class="history-meta">
           <div class="history-video-title">{{ item.title }}</div>
-          <div class="history-video-time">{{ item.time }}</div>
+          <div class="history-video-time">
+            <template v-if="item.status === 0">处理中...</template>
+            <template v-else>{{ item.time }}</template>
+          </div>
         </div>
       </div>
     </div>
@@ -96,5 +102,18 @@ defineEmits<{
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 2px;
+}
+/* 处理中动画 */
+.processing-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e2e8f0;
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>

@@ -62,7 +62,7 @@ import { useChat } from '@/composables/useChat'
 import { renderMarkdown } from '@/utils/markdown'
 import request from '@/utils/request'
 import type { Message } from '@/types/message'
-import { loadSseState } from '@/composables/sseSession'
+import { loadSseState, clearSseState, saveSseState } from '@/composables/sseSession'
 
 // ========== 用户数据 ==========
 const userStore = useUserStore()
@@ -94,6 +94,18 @@ watch(() => summary.isLoading, (newVal, oldVal) => {
   }
 })
 
+// metadata 到达时 Conversation 已入库，刷新历史列表让处理中的对话立刻可见
+watch(() => summary.subtitleCount, (newVal) => {
+  if (newVal > 0) history.load()
+})
+
+// 当 conversationId 确定后（metadata 或 done 事件），同步历史记录高亮
+watch(() => summary.currentConversationId, (newVal) => {
+  if (newVal) {
+    history.activeId = newVal
+  }
+})
+
 // ========== 操作 ==========
 function turnToOptions() {
   historyView.value = currentView.value === 'options' ? 'upload' : currentView.value
@@ -116,6 +128,8 @@ async function handleStartSummary() {
   const result = await summary.start(videoUrl.value, userStore.cookie, userStore.token)
   if(result === 'cached' || result === 'streaming') {
     currentView.value = 'chat'
+    // 新对话已创建（即使是处理中 status=0），刷新历史列表
+    history.load()
   }
 }
 
@@ -125,6 +139,10 @@ async function handleSendMessage(text: string) {
 }
 
 async function handleSelectHistory(id: number) {
+  // 用户主动切换上下文：中断旧的 SSE 连接，防止后台流事件覆盖当前视图的数据
+  summary.abort()
+  clearSseState()
+
   history.activeId = id
   const data = await history.loadDetail(id)
   if (!data) return
@@ -134,8 +152,27 @@ async function handleSelectHistory(id: number) {
   summary.currentVideoId = data.videoId || null
   summary.currentVideoTitle = data.title || '未命名视频'
   summary.subtitleCount = data.subtitleCount || 0
-  summary.stage = 'done'
   videoUrl.value = data.url || ''
+
+  // 处理中的对话（status=0）：通过 sid 重连 SSE 流
+  if (data.status === 0 && data.sid) {
+    summary.stage = 'parsing'
+    summary.isLoading = true
+    summary.confirmText = '重连中...'
+    messages.value = [{
+      id: Date.now() + '_placeholder',
+      role: 'ai',
+      isPlaceholder: true,
+      placeholderType: 'summary'
+    }]
+    // 保存状态并重连（abort 已断开旧连接，cleanSid 会标记 pendingCatchup，
+    // 新连接建立后 pushChunk 检测到 emitter 回来 → 自动补发 catchup）
+    saveSseState({ sid: data.sid, type: 'summary', view: 'chat' })
+    summary.reconnect(data.sid, userStore.token)
+    return
+  }
+
+  summary.stage = 'done'
 
   if (data.messages && data.messages.length > 0) {
     messages.value = data.messages.map((msg: any, idx: number) => ({
@@ -178,8 +215,20 @@ onMounted(() => {
   // 延迟一下，确保 DOM 和 store 已就绪
   setTimeout(() => {
     if (savedState.type === 'summary') {
-      currentView.value = 'chat'
+      // 恢复到刷新前所在的视图（如果之前就是 upload，保持在 upload）
+      if (savedState.view === 'upload') {
+        // 之前就在开始总结页面等待，保持在当前视图，后台重连
+        currentView.value = 'upload'
+        summary.isLoading = true
+        summary.confirmText = '重连中...'
+        // 后台重连 SSE，token 到来后手动切到 chat 视图
+      }
       summary.reconnect(savedState.sid, userStore.token)
+      // 重连成功后（收到第一个 chunk/metadata/catchup）自动切到 chat
+      // 这个逻辑在 processChunk 中：收到数据后 currentView 应为 chat
+      if (savedState.view !== 'upload') {
+        currentView.value = 'chat'
+      }
     } else if (savedState.type === 'chat' && savedState.conversationId) {
       // Chat 重连：先加载历史消息，再创建占位符，最后重连 SSE
       currentView.value = 'chat'

@@ -20,10 +20,12 @@ import com.example.backend.vo.MessageVO;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 
 @Service
@@ -39,6 +41,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private VideoMapper videoMapper;
     @Autowired
     private MessageMapper messageMapper;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     @Override
     public boolean register(RegisterDTO registerDTO) {
@@ -103,10 +107,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Override
     public List<Conversation> getList(){
         Long userId = BaseContext.getCurrentId();
+        // 包含处理中(status=0)和已完成(status=1)，排除失败(status=2)
         List<Conversation> list = conversationMapper.selectList(
             Wrappers.<Conversation>lambdaQuery()
                 .eq(Conversation::getUserId, userId)
-                .eq(Conversation::getStatus, 1)
+                .in(Conversation::getStatus, Arrays.asList(0, 1))
                 .orderByDesc(Conversation::getUpdatedAt)
         );
         return list;
@@ -120,6 +125,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         );
         MessageVO messageVO = new MessageVO();
         BeanUtils.copyProperties(conversation, messageVO);
+
+        // 处理中的对话：从 Redis 获取 sid，供前端重连 SSE
+        if (conversation != null && conversation.getStatus() == 0) {
+            String sid = redisTemplate.opsForValue()
+                .get("videomind:sse:conv:" + id);
+            messageVO.setSid(sid);
+        }
+
         List<Message> list = messageMapper.selectList(
             Wrappers.<Message>lambdaQuery()
                 .eq(Message::getConversationId, id)

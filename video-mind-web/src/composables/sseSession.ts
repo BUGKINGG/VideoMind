@@ -14,6 +14,8 @@ export interface SseState {
     conversationId?: number | null
     /** 视频 ID（summary 类型时需要） */
     videoId?: number | null
+    /** 刷新前所在的视图，用于恢复 */
+    view?: 'upload' | 'chat'
 }
 
 export function saveSseState(state: SseState): void {

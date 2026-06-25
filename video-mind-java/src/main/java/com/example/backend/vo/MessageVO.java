@@ -18,5 +18,6 @@ public class MessageVO {
     private Integer part;
     private Integer subtitleCount;
     private List<Message> messages;
+    private String sid;       // 当 status=0 时，用于前端重连 SSE
 
 }

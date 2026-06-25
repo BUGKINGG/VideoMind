@@ -55,14 +55,11 @@ export function useHistory() {
                     return null
                 }
                 const data = res.data
-                if (data.status === 0) {
-                    alert('视频还在处理中，请稍后')
-                    return null
-                }
                 if (data.status === 2) {
                     alert('视频解析失败，请重新提交')
                     return null
                 }
+                // status=0（处理中）也返回，前端根据 sid 自动重连 SSE
                 return data
             } catch (e) {
                 console.error('加载记录失败', e)

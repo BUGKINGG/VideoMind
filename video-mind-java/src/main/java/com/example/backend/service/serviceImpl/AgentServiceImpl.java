@@ -116,6 +116,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
     private static final String REDIS_SSE_SUMMARY_PREFIX = "videomind:sse:summary:";
     private static final String REDIS_SSE_CHAT_PREFIX = "videomind:sse:chat:";
+    private static final String REDIS_SSE_CONV_PREFIX = "videomind:sse:conv:";
     private static final String REDIS_VIDEO_AGENT_PREFIX = "videomind:video:agent_id:";
     private static final long REDIS_SSE_TTL_MINUTES = 10;
     private static final String REDIS_LOCK_VIDEO_PREFIX = "videomind:lock:video:";
@@ -531,6 +532,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         // 视频还在处理中，建立SSE长连接
+        // 先清理可能残留的旧 emitter（重连场景），防止旧回调误删新 emitter
+        SseEmitter oldEmitter = emitters.remove(sid);
+        if (oldEmitter != null) {
+            try { oldEmitter.complete(); } catch (Exception ignored) {}
+        }
         SseEmitter emitter = new SseEmitter(300_000L);
         emitters.put(sid, emitter);
 
@@ -574,13 +580,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     /**
-     * 更新 catchup 元数据（标题、字幕数量），在 pushMetadata 时调用
+     * 更新 catchup 元数据（标题、字幕数量、会话ID），在 pushMetadata 时调用
      */
-    private void updateCatchupMeta(String sid, String title, int subtitleCount) {
+    private void updateCatchupMeta(String sid, String title, int subtitleCount, Long conversationId) {
         try {
             Map<String, Object> meta = new HashMap<>();
             meta.put("title", title);
             meta.put("subtitleCount", subtitleCount);
+            if (conversationId != null) {
+                meta.put("conversationId", conversationId);
+            }
             catchupMetas.put(sid, new ObjectMapper().writeValueAsString(meta));
         } catch (Exception e) {
             log.warn("更新catchup meta失败, sid={}", sid, e);
@@ -603,6 +612,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 Map<String, Object> meta = new ObjectMapper().readValue(metaJson, Map.class);
                 payload.put("title", meta.getOrDefault("title", ""));
                 payload.put("subtitleCount", meta.getOrDefault("subtitleCount", 0));
+                if (meta.containsKey("conversationId")) {
+                    payload.put("conversationId", meta.get("conversationId"));
+                }
             } catch (Exception e) {
                 log.warn("解析 catchup meta 失败", e);
             }
@@ -669,6 +681,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         final Set<String> waitingSids = redisTemplate.opsForSet()
             .members("videomind:waiting:" + videoId);
 
+        Long conversationId = null;
         try {
             // 给python视频解析服务传递url和cookie
             String pythonUrl = parserServiceUrl + "/parse";
@@ -754,15 +767,32 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 subtitleMapper.insertBatch(subList);
             }
 
+            // 提前创建 Conversation（status=0），让前端历史记录立即可见
+            // 必须放在 pushMetadata 之前，确保前端收到 metadata 后刷新历史列表时记录已入库
+            Conversation earlyConv = new Conversation();
+            earlyConv.setUserId(userId);
+            earlyConv.setTitle(title);
+            earlyConv.setVideoId(videoId);
+            earlyConv.setStatus(0);
+            earlyConv.setSubtitleCount(count);
+            earlyConv.setCreatedAt(LocalDateTime.now());
+            earlyConv.setUpdatedAt(LocalDateTime.now());
+            conversationMapper.insert(earlyConv);
+            conversationId = earlyConv.getId();
+
             // 字幕解析完成，立即推送 metadata，让前端提前显示标题和字幕数
-            pushMetadata(sid, title, count);
+            pushMetadata(sid, title, count, conversationId);
             if (waitingSids != null) {
                 for (String waitSid : waitingSids) {
                     if (!waitSid.equals(sid)) {
-                        pushMetadata(waitSid, title, count);
+                        pushMetadata(waitSid, title, count, conversationId);
                     }
                 }
             }
+            // 存储 Redis 映射，方便后续通过 conversationId 查找 sid 进行重连
+            redisTemplate.opsForValue().set(
+                REDIS_SSE_CONV_PREFIX + conversationId, sid, Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
+            log.info("[Summary] 提前创建 Conversation: id={}, sid={}", conversationId, sid);
 
             // 调用 Agent 服务进行字幕处理和总结
             // video_id 使用 bvid + "_p" + part 格式，确保唯一性
@@ -868,19 +898,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 log.error("[Summary] 写入 Redis 缓存失败", e);
             }
 
-            // 创建conversation表并且保存
-            Conversation conversation = new Conversation();
-            conversation.setUserId(userId);
-            conversation.setTitle(title);
-            conversation.setVideoId(videoId);
-            conversation.setStatus(1);
-            conversation.setSubtitleCount(count);
-            conversation.setCreatedAt(LocalDateTime.now());
-            conversation.setUpdatedAt(LocalDateTime.now());
-            conversationMapper.insert(conversation);
+            // 更新 Conversation 为完成状态（之前已创建 status=0 的记录）
+            Conversation updConv = new Conversation();
+            updConv.setId(conversationId);
+            updConv.setStatus(1);
+            updConv.setUpdatedAt(LocalDateTime.now());
+            conversationMapper.updateById(updConv);
 
             // 创建message表，插入summary数据并且保存
-            Long conversationId = conversation.getId();
             Message message = new Message();
             message.setRole("ai");
             message.setContent(summary);
@@ -900,8 +925,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 }
                 redisTemplate.delete("videomind:waiting:" + videoId);
             }
-            // 处理完成，清理断线续传缓冲区
+            // 处理完成，清理断线续传缓冲区和 Redis 映射
             unregisterContentBuffer(sid);
+            redisTemplate.delete(REDIS_SSE_CONV_PREFIX + conversationId);
 
         } catch (Exception e) {
             // 标记失败，避免前端无限等待
@@ -912,6 +938,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             fail.setStatus(2);
             fail.setSummary("处理失败: " + e.getMessage());
             videoMapper.updateById(fail);
+
+            // 更新提前创建的 Conversation 为失败状态
+            if (conversationId != null) {
+                Conversation failConv = new Conversation();
+                failConv.setId(conversationId);
+                failConv.setStatus(2);
+                failConv.setUpdatedAt(LocalDateTime.now());
+                conversationMapper.updateById(failConv);
+                redisTemplate.delete(REDIS_SSE_CONV_PREFIX + conversationId);
+            }
 
             pushError(sid, e.getMessage());
             if (waitingSids != null) {
@@ -995,6 +1031,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                         Map<String, Object> meta = new ObjectMapper().readValue(metaJson, Map.class);
                         catchupPayload.put("title", meta.getOrDefault("title", ""));
                         catchupPayload.put("subtitleCount", meta.getOrDefault("subtitleCount", 0));
+                        if (meta.containsKey("conversationId")) {
+                            catchupPayload.put("conversationId", meta.get("conversationId"));
+                        }
                     }
                     String catchupJson = new ObjectMapper().writeValueAsString(catchupPayload);
                     String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
@@ -1033,9 +1072,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * SSE 流式推送：元数据事件
      * Python 解析成功后立即推送标题和字幕数量，前端可提前渲染
      */
-    private void pushMetadata(String sid, String title, int subtitleCount) {
+    private void pushMetadata(String sid, String title, int subtitleCount, Long conversationId) {
         // 存入断线续传元数据（无论 emitter 是否在线）
-        updateCatchupMeta(sid, title, subtitleCount);
+        updateCatchupMeta(sid, title, subtitleCount, conversationId);
 
         SseEmitter emitter = emitters.get(sid);
         if (emitter != null) {
@@ -1044,6 +1083,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 payload.put("type", "metadata");
                 payload.put("title", title);
                 payload.put("subtitleCount", subtitleCount);
+                if (conversationId != null) {
+                    payload.put("conversationId", conversationId);
+                }
                 String json = new ObjectMapper().writeValueAsString(payload);
                 emitter.send(SseEmitter.event().name("message").data(json));
             } catch (Exception e) {
@@ -1080,13 +1122,17 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
+        Map<String, Object> body = new HashMap<>();
+        body.put("sid", sid);
+        body.put("type", "metadata");
+        body.put("title", title != null ? title : "");
+        body.put("subtitleCount", subtitleCount);
+        if (conversationId != null) {
+            body.put("conversationId", conversationId);
+        }
         instanceWebClient.post()
             .uri(targetUrl + "/internal/sse/push")
-            .bodyValue(Map.of(
-                "sid", sid, "type", "metadata",
-                "title", title != null ? title : "",
-                "subtitleCount", subtitleCount
-            ))
+            .bodyValue(body)
             .retrieve()
             .toBodilessEntity()
             .timeout(Duration.ofSeconds(5))
@@ -1335,6 +1381,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         // 3. 还在处理中，建立 SSE 长连接等待 doChatProcess 推送
+        // 先清理可能残留的旧 emitter（重连场景）
+        SseEmitter oldEmitter = emitters.remove(sid);
+        if (oldEmitter != null) {
+            try { oldEmitter.complete(); } catch (Exception ignored) {}
+        }
         SseEmitter emitter = new SseEmitter(120_000L);
         emitters.put(sid, emitter);
 
@@ -1621,8 +1672,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     @Override
-    public void pushMetadataInternal(String sid, String title, int subtitleCount) {
-        pushMetadata(sid, title, subtitleCount);
+    public void pushMetadataInternal(String sid, String title, int subtitleCount, Long conversationId) {
+        pushMetadata(sid, title, subtitleCount, conversationId);
     }
 
     @Override

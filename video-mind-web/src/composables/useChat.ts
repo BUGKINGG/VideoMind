@@ -182,6 +182,11 @@ export function useChat(messages: Ref<Message[]>) {
             }
 
         } catch (error: any) {
+            // AbortError 是用户主动切换导致的，静默处理
+            if (error.name === 'AbortError') {
+                console.log('[Chat SSE] 连接已被中断')
+                return
+            }
             console.error('[Chat SSE] 异常:', error)
             if (retryCount < MAX_RETRIES) {
                 console.log(`[Chat SSE] ${delays[retryCount]}ms 后进行第 ${retryCount + 1} 次重连...`)

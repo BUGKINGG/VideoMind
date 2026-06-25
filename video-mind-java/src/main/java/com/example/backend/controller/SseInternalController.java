@@ -44,7 +44,9 @@ public class SseInternalController {
                     String title = (String) payload.get("title");
                     Integer subtitleCount = payload.get("subtitleCount") != null
                         ? Integer.valueOf(payload.get("subtitleCount").toString()) : 0;
-                    agentService.pushMetadataInternal(sid, title, subtitleCount);
+                    Long conversationId = payload.get("conversationId") != null
+                        ? Long.valueOf(payload.get("conversationId").toString()) : null;
+                    agentService.pushMetadataInternal(sid, title, subtitleCount, conversationId);
                 }
                 case "done" -> {
                     Long videoId = payload.get("videoId") != null

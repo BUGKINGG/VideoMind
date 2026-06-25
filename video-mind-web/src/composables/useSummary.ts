@@ -11,6 +11,9 @@ export type SummaryStage = 'parsing' | 'summarizing' | 'done'
 export function useSummary(messages: Ref<Message[]>) {
     const { start: startAnim, stop: stopAnim } = usePlaceholder()
 
+    // SSE fetch 的 AbortController，用于切换历史记录时中断旧连接
+    let abortController: AbortController | null = null
+
     const summary = reactive({
         isLoading: false,
         confirmText: '开始总结',
@@ -19,6 +22,14 @@ export function useSummary(messages: Ref<Message[]>) {
         subtitleCount: 0,
         currentConversationId: null as number | null,
         currentVideoId: null as number | null,
+
+        /** 中断当前 SSE 连接（切换历史记录时调用） */
+        abort() {
+            if (abortController) {
+                abortController.abort()
+                abortController = null
+            }
+        },
 
         // 处理chunk流
         processChunk(chunk: string): { type?: 'done' | 'error' } | void {
@@ -42,6 +53,9 @@ export function useSummary(messages: Ref<Message[]>) {
                 summary.currentVideoTitle = data.title || summary.currentVideoTitle
                 summary.subtitleCount = data.subtitleCount || 0
                 summary.stage = 'summarizing'
+                if (data.conversationId) {
+                    summary.currentConversationId = data.conversationId
+                }
                 return
             }
 
@@ -51,6 +65,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 // 更新元数据
                 if (data.title) summary.currentVideoTitle = data.title
                 if (data.subtitleCount) summary.subtitleCount = data.subtitleCount
+                if (data.conversationId) summary.currentConversationId = data.conversationId
                 summary.stage = 'summarizing'
                 stopAnim()
                 // 替换占位符为累积内容
@@ -131,10 +146,10 @@ export function useSummary(messages: Ref<Message[]>) {
                 summary.currentConversationId = data.conversationId || null
                 summary.currentVideoId = data.videoId || null
                 summary.stage = 'done'
-                const idx = messages.value.findIndex(m => m.isStreaming)
+                // 匹配流式消息或占位符（重连场景下可能是纯 placeholder）
+                const idx = messages.value.findIndex(m => m.isStreaming || m.isPlaceholder)
                 if (idx !== -1) {
-                    const raw = messages.value[idx].rawContent || ''
-
+                    const raw = messages.value[idx].rawContent || data.summary || ''
                     messages.value.splice(idx, 1, {
                         id: messages.value[idx].id,
                         role: 'ai',
@@ -217,7 +232,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 }]
 
                 // 保存会话状态到 sessionStorage，供刷新后恢复
-                saveSseState({ sid: sessionId, type: 'summary' })
+                saveSseState({ sid: sessionId, type: 'summary', view: 'chat' })
 
                 // 启动 SSE，不等待
                 runSSE(sessionId, token)
@@ -245,6 +260,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 id: Date.now() + '_placeholder',
                 role: 'ai',
                 isPlaceholder: true,
+                isStreaming: true,
                 placeholderType: 'summary'
             }]
             runSSE(sessionId, token)
@@ -257,10 +273,16 @@ export function useSummary(messages: Ref<Message[]>) {
         const delays = [1000, 2000, 4000] // 指数退避
         let isStreamCompleted = false
 
+        // 创建新的 AbortController（中断旧的）
+        if (abortController) abortController.abort()
+        abortController = new AbortController()
+        const signal = abortController.signal
+
         try {
             // 向后端发送SSE请求，由于axios不支持SSE，因此使用fetch和自定义header
             const response = await fetch(`/agent/summary/stream?sid=${sessionId}`, {
-                headers: { 'token': token }
+                headers: { 'token': token },
+                signal
             })
             if (!response.ok) throw new Error(`SSE 连接失败: ${response.status}`)
 
@@ -306,6 +328,11 @@ export function useSummary(messages: Ref<Message[]>) {
             }
 
         } catch (error: any) {
+            // AbortError 是用户主动切换导致的，静默处理，不重试
+            if (error.name === 'AbortError') {
+                console.log('[SSE] 连接已被中断（用户切换上下文）')
+                return
+            }
             stopAnim()
             console.error('SSE 异常:', error)
             // 自动重连
