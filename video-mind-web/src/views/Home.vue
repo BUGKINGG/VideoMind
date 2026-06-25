@@ -97,7 +97,7 @@
             <div class="chat-header-icon">🎬</div>
             <div class="chat-header-info">
               <h3>{{ currentVideoTitle }}</h3>
-              <p>正在分析视频内容 • 已提取 {{ subtitleCount }} 条字幕片段</p>
+              <p>{{ headerStatusText }}</p>
             </div>
           </div>
           <button class="back-btn" @click="backToUpload">← 返回上传</button>
@@ -114,8 +114,12 @@
       {{ msg.role === 'ai' ? 'AI' : '我' }}
     </div>
     <div class="message-content">
+      <!-- AI 占位消息：动态省略号 -->
+      <div v-if="msg.isPlaceholder" class="placeholder-message">
+        <div class="placeholder-main">{{ msg.placeholderType === 'chat' ? getChatPlaceholderText() : getSummaryPlaceholderText() }}</div>
+      </div>
       <!-- AI 消息：v-html 渲染 Markdown 转成的 HTML -->
-      <div v-if="msg.role === 'ai'" class="markdown-body" v-html="msg.content"></div>
+      <div v-else-if="msg.role === 'ai'" class="markdown-body" v-html="msg.content"></div>
       <!-- 用户消息：纯文本，防止 XSS -->
       <div v-else>{{ msg.content }}</div>
     </div>
@@ -210,6 +214,44 @@ const userUid = ref('19241001')
 const confirm_text = ref('开始总结')
 const isLoading = ref(false)
 const isProcess = ref(false)
+
+// 占位消息动态省略号相关
+const placeholderDots = ref(1)
+let placeholderTimer = null
+
+/**
+ * 启动占位消息省略号动画：1 -> 2 -> 3 -> 1 循环
+ * 让用户感知页面仍在运行，没有被卡死
+ */
+function startPlaceholderAnimation() {
+  stopPlaceholderAnimation()
+  placeholderDots.value = 1
+  placeholderTimer = setInterval(() => {
+    placeholderDots.value = placeholderDots.value % 3 + 1
+  }, 500)
+}
+
+/**
+ * 停止占位消息省略号动画
+ */
+function stopPlaceholderAnimation() {
+  if (placeholderTimer) {
+    clearInterval(placeholderTimer)
+    placeholderTimer = null
+  }
+}
+
+/**
+ * 占位消息文本：动态省略号
+ */
+function getSummaryPlaceholderText() {
+  return '正在解析视频内容并生成总结' + '。'.repeat(placeholderDots.value)
+}
+
+function getChatPlaceholderText() {
+  return '思考中' + '。'.repeat(placeholderDots.value)
+}
+
 const userInitials = computed(() => {
   return userName.value
       .split(' ')
@@ -306,6 +348,7 @@ async function selectHistory(id) {
     currentVideoId.value = data.videoId || null
     currentVideoTitle.value = data.title || '未命名视频'
     subtitleCount.value = data.subtitleCount || 0
+    summaryStage.value = 'done'
     videoUrl.value = data.url || ''  // 保留 url，方便用户知道是哪个视频
 
     if(data.messages && data.messages.length > 0){
@@ -338,6 +381,24 @@ const currentVideoTitle = ref('')
 const subtitleCount = ref(0)
 const currentConversationId = ref(null)
 const currentVideoId = ref(null)
+
+// 总结流程的阶段：parsing（解析字幕） / summarizing（生成总结） / done（总结完成）
+// 用于控制顶部 header 的状态文字，避免总结完成后仍显示"正在分析视频内容"
+const summaryStage = ref('parsing')
+
+/**
+ * 顶部 header 状态文字，根据当前处理阶段动态变化
+ */
+const headerStatusText = computed(() => {
+  if (summaryStage.value === 'done') {
+    return `总结完成 • 已提取 ${subtitleCount.value} 条字幕片段`
+  }
+  if (summaryStage.value === 'summarizing') {
+    return `正在生成总结 • 已提取 ${subtitleCount.value} 条字幕片段`
+  }
+  return `正在分析视频内容 • 已提取 ${subtitleCount.value} 条字幕片段`
+})
+
 const historyView = ref('')
 const showCookieModal = ref(false)
 const showAboutModal = ref(false)
@@ -378,14 +439,25 @@ function processSseChunk(chunk) {
     const data = JSON.parse(dataStr)
     console.log('[SSE] 收到事件:', eventName, data)
 
+    if (eventName === 'message' && data.type === 'chunk') {
+      if (!data.content) return  // 忽略空心跳
+    }
+
     if (eventName === 'connect') {
       console.log('SSE 已连接')
+    }
+    else if (eventName === 'message' && data.type === 'metadata') {
+      // 字幕解析完成，提前显示标题和字幕数量
+      currentVideoTitle.value = data.title || currentVideoTitle.value
+      subtitleCount.value = data.subtitleCount || 0
+      summaryStage.value = 'summarizing'
     }
     else if (eventName === 'message' && data.type === 'chunk') {
       // 流式内容片段：替换占位消息或更新流式消息
       const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
       if (placeholderIndex !== -1) {
-        // 第一次收到内容，替换占位消息
+        // 第一次收到内容，停止占位动画并替换占位消息
+        stopPlaceholderAnimation()
         messages.value[placeholderIndex] = {
           role: 'ai',
           // 流式阶段用纯文本，避免 markdown 解析不完整
@@ -406,10 +478,12 @@ function processSseChunk(chunk) {
     }
     else if (eventName === 'message' && data.type === 'done') {
       // 流式完成：更新标题、字幕数，渲染最终 markdown
+      stopPlaceholderAnimation()
       currentVideoTitle.value = data.title
       subtitleCount.value = data.subtitleCount || 0
       currentConversationId.value = data.conversationId || null
       currentVideoId.value = data.videoId || null
+      summaryStage.value = 'done'
       const idx = messages.value.findIndex(m => m.isStreaming)
       if (idx !== -1) {
         const raw = messages.value[idx].rawContent || ''
@@ -423,6 +497,7 @@ function processSseChunk(chunk) {
       return {type: 'done'}
     }
     else if (eventName === 'error') {
+      stopPlaceholderAnimation()
       const msg = data.message || '未知错误'
       const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
       if (placeholderIndex !== -1) {
@@ -465,6 +540,8 @@ async function startSummary() {
   // 防重入：如果正在处理，直接忽略
   if (isLoading.value) return
 
+  let isStreamCompleted = false
+
   try {
     isLoading.value = true
     confirm_text.value = '解析中...'
@@ -486,6 +563,7 @@ async function startSummary() {
       subtitleCount.value = res.data.subtitleCount || 0
       currentConversationId.value = res.data.conversationId || null
       currentVideoId.value = res.data.videoId || null
+      summaryStage.value = 'done'
       messages.value = [{
         id: Date.now() + '_summary',
         role: 'ai',
@@ -494,6 +572,7 @@ async function startSummary() {
       currentView.value = 'chat'
       isLoading.value = false
       confirm_text.value = '开始总结'
+      isStreamCompleted = true
       return
     }
 
@@ -501,11 +580,13 @@ async function startSummary() {
     currentView.value = 'chat'
     currentVideoTitle.value = videoUrl.value
     subtitleCount.value = 0
+    summaryStage.value = 'parsing'
+    startPlaceholderAnimation()
     messages.value = [{
       id: Date.now() + '_placeholder',
       role: 'ai',
-      content: '正在解析视频内容并生成总结，请稍候...',
-      isPlaceholder: true
+      isPlaceholder: true,
+      placeholderType: 'summary'
     }]
 
     // 建立 SSE 连接监听流式结果
@@ -530,7 +611,10 @@ async function startSummary() {
       if (done) {
         const remaining = buffer.split('\n\n')
         for (const chunk of remaining) {
-          processSseChunk(chunk)
+          const result = processSseChunk(chunk)
+          if(result?.type === 'done' || result?.type === 'error'){
+            isStreamCompleted = true
+          }
         }
         break
       }
@@ -572,7 +656,10 @@ async function startSummary() {
       buffer = chunks.pop() || ''
 
       for (const chunk of chunks) {
-        processSseChunk(chunk)
+        const result = processSseChunk(chunk)
+        if(result?.type === 'done' || result?.type === 'error'){
+          isStreamCompleted = true
+        }
       }
     }
 
@@ -581,6 +668,7 @@ async function startSummary() {
     }
 
   } catch (error) {
+    stopPlaceholderAnimation()
     console.error('总结流程异常:', error)
     alert('请求失败: ' + (error.message || '请检查网络或登录状态'))
   } finally {
@@ -589,6 +677,8 @@ async function startSummary() {
       isLoading.value = false
       confirm_text.value = '开始总结'
     }
+    // 兜底：确保占位动画停止，避免内存泄漏
+    stopPlaceholderAnimation()
 
     loadHistory()
   }
@@ -680,7 +770,13 @@ async function sendMessage() {
   // 2. AI 占位，记录固定索引
   const aiIndex = messages.value.length
   const aiId = Date.now() + '_ai'
-  messages.value.push({ id: aiId, role: 'ai', content: '思考中...', isStreaming: true })
+  messages.value.push({
+    id: aiId,
+    role: 'ai',
+    isPlaceholder: true,
+    placeholderType: 'chat'
+  })
+  startPlaceholderAnimation()
   scrollToBottom()
 
   try {
@@ -712,9 +808,11 @@ async function sendMessage() {
       for (const chunk of chunks) processChatChunk(chunk, aiIndex)
     }
   } catch (error) {
+    stopPlaceholderAnimation()
     console.error('发送失败:', error)
     messages.value.splice(aiIndex, 1, { id: messages.value[aiIndex]?.id, role: 'ai', content: '发送失败，请重试' })
   } finally {
+    stopPlaceholderAnimation()
     isProcess.value = false
   }
 }
@@ -734,8 +832,9 @@ function processChatChunk(chunk, aiIndex) {
 
     if (eventName === 'message' && data.type === 'chunk') {
       const current = messages.value[aiIndex]
-      if (current.content === '思考中...') {
-        // 第一个 token
+      if (current.isPlaceholder) {
+        // 第一个 token：停止占位动画，替换为正式流式消息
+        stopPlaceholderAnimation()
         messages.value.splice(aiIndex, 1, {
           id: current.id,
           role: 'ai',
@@ -756,6 +855,7 @@ function processChatChunk(chunk, aiIndex) {
       scrollToBottom()
     }
     else if (eventName === 'message' && data.type === 'done') {
+      stopPlaceholderAnimation()
       const current = messages.value[aiIndex]
       const raw = current.rawContent || ''
       messages.value.splice(aiIndex, 1, {
@@ -766,6 +866,7 @@ function processChatChunk(chunk, aiIndex) {
       loadHistory()
     }
     else if (eventName === 'error') {
+      stopPlaceholderAnimation()
       messages.value.splice(aiIndex, 1, {
         id: messages.value[aiIndex]?.id,
         role: 'ai',
@@ -1226,6 +1327,26 @@ function autoResize() {
   text-align: left;          /* 强制左对齐 */
   width: 100%;
   color: var(--text-primary);
+}
+
+/* 占位消息样式：主文字 + 提示文字 */
+.placeholder-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.placeholder-main {
+  font-size: 18px;
+  line-height: 1.8;
+  color: var(--text-primary);
+  white-space: pre-line;
+}
+
+.placeholder-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .message.user .message-content {

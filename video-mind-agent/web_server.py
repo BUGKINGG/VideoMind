@@ -156,7 +156,8 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
             # 流式生成
             full_answer = []
-            for token in agent.video_qa.answer_stream(transcript, question, chunks, history):
+            summary = agent.video_repository.load_summary(video_id, resolved_owner)
+            for token in agent.video_qa.answer_stream(transcript, question, chunks, history, summary=summary):
                 full_answer.append(token)
                 payload = json.dumps({
                     "type": "chunk",
@@ -269,8 +270,22 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
 
-            # 4. 推 done
+            # 4. 保存总结，供后续问答使用
             summary = "".join(full_summary)
+            agent.video_repository.save_summary(
+                video_id=video_id, summary=summary, owner_user_id=user_id
+            )
+            # 同时写入对话历史，让 Agent 记得"刚才总结过什么"
+            summary_session_id = str(body.get("session_id", video_id))
+            user_turn = ChatTurn(role="user", content="请总结这个视频")
+            assistant_turn = ChatTurn(role="assistant", content=summary)
+            agent.conversation_repository.add_turn(
+                user_id, summary_session_id, user_turn, video_id=video_id
+            )
+            agent.conversation_repository.add_turn(
+                user_id, summary_session_id, assistant_turn, video_id=video_id
+            )
+
             done_payload = json.dumps({
                 "type": "done",
                 "video_id": video_id,

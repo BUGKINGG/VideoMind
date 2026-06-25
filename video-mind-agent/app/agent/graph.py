@@ -133,21 +133,35 @@ class AgentGraphRunner:
             transcript_owner_user_id=state["resolved_owner_user_id"],
         )
 
+        summary = self.service.video_repository.load_summary(
+            state["video_id"],
+            owner_user_id=state["resolved_owner_user_id"],
+        )
 
         answer = self.service.video_qa.answer(
             transcript=transcript,
             question=state["message"],
             relevant_chunks=retrieved_chunks,
             history=state.get("history", []),
+            summary=summary,
         )
         return {**state, "answer": answer, "retrieved_chunks": retrieved_chunks}
 
     def video_summary(self, state: AgentGraphState) -> AgentGraphState:
-        summary = self.service.summarize_video(
+        summary_result = self.service.summarize_video(
             video_id=state["video_id"],
             owner_user_id=state["resolved_owner_user_id"],
         )
-        return {**state, "answer": summary["summary"], "retrieved_chunks": []}
+        summary = summary_result["summary"]
+
+        # 持久化总结，便于后续问答引用
+        self.service.video_repository.save_summary(
+            video_id=state["video_id"],
+            summary=summary,
+            owner_user_id=state["resolved_owner_user_id"],
+        )
+
+        return {**state, "answer": summary, "retrieved_chunks": []}
 
     def save_conversation(self, state: AgentGraphState) -> AgentGraphState:
         history = state.get("history", [])

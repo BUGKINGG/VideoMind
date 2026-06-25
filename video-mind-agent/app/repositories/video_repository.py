@@ -26,6 +26,7 @@ class SQLiteVideoRepository:
                     video_id TEXT NOT NULL,
                     owner_user_id TEXT NOT NULL,
                     title TEXT NOT NULL,
+                    summary TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (video_id, owner_user_id)
@@ -52,6 +53,16 @@ class SQLiteVideoRepository:
                 );
                 """
             )
+            # 兼容旧数据库：添加 summary 列
+            self._add_summary_column_if_missing(conn)
+
+    def _add_summary_column_if_missing(self, conn: sqlite3.Connection) -> None:
+        columns = [
+            row[1] for row in
+            conn.execute("PRAGMA table_info(videos)").fetchall()
+        ]
+        if "summary" not in columns:
+            conn.execute("ALTER TABLE videos ADD COLUMN summary TEXT")
 
     def save_transcript(
         self,
@@ -92,6 +103,36 @@ class SQLiteVideoRepository:
                     for index, segment in enumerate(transcript.segments)
                 ],
             )
+
+    def save_summary(
+        self,
+        video_id: str,
+        summary: str,
+        owner_user_id: str = DEFAULT_OWNER_USER_ID,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO videos (video_id, owner_user_id, title, summary)
+                VALUES (?, ?, '', ?)
+                ON CONFLICT(video_id, owner_user_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (video_id, owner_user_id, summary),
+            )
+
+    def load_summary(
+        self,
+        video_id: str,
+        owner_user_id: str = DEFAULT_OWNER_USER_ID,
+    ) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT summary FROM videos WHERE video_id = ? AND owner_user_id = ?",
+                (video_id, owner_user_id),
+            ).fetchone()
+        return row["summary"] if row else None
 
     def save_chunks(
         self,

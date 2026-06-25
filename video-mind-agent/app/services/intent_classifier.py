@@ -24,4 +24,20 @@ class IntentClassifier:
             "summary",
             "summarize",
         )
-        return any(marker in message for marker in summary_markers)
+        if any(marker in message for marker in summary_markers):
+            return True
+
+        # 用户可能在追问刚才总结的内容，而不是重新总结
+        follow_up_markers = (
+            "刚才讲了什么",
+            "刚才说了什么",
+            "前面讲了什么",
+            "之前讲了什么",
+            "刚才总结",
+            "前面总结",
+            "之前总结",
+            "你刚才",
+            "你前面",
+            "你之前",
+        )
+        return any(marker in message for marker in follow_up_markers)

@@ -36,6 +36,12 @@ public class SseInternalController {
                     String token = (String) payload.get("token");
                     agentService.pushChunkInternal(sid, token);
                 }
+                case "metadata" -> {
+                    String title = (String) payload.get("title");
+                    Integer subtitleCount = payload.get("subtitleCount") != null
+                        ? Integer.valueOf(payload.get("subtitleCount").toString()) : 0;
+                    agentService.pushMetadataInternal(sid, title, subtitleCount);
+                }
                 case "done" -> {
                     Long videoId = payload.get("videoId") != null
                         ? Long.valueOf(payload.get("videoId").toString()) : null;

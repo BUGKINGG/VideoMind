@@ -685,6 +685,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 subtitleMapper.insertBatch(subList);
             }
 
+            // 字幕解析完成，立即推送 metadata，让前端提前显示标题和字幕数
+            pushMetadata(sid, title, count);
+            if (waitingSids != null) {
+                for (String waitSid : waitingSids) {
+                    if (!waitSid.equals(sid)) {
+                        pushMetadata(waitSid, title, count);
+                    }
+                }
+            }
+
             // 调用 Agent 服务进行字幕处理和总结
             // video_id 使用 bvid + "_p" + part 格式，确保唯一性
             String agentVideoId = (bvid != null ? bvid : "video") + "_p" + part;
@@ -897,6 +907,72 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             .timeout(Duration.ofSeconds(5))
             .doOnError(e -> {
                 log.error("[PushChunk] 转发 chunk 到 {} 失败, sid={}", targetUrl, sid, e);
+                redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofSeconds(30));
+                redisTemplate.delete("videomind:sse:owner:" + sid);
+            })
+            .subscribe();
+    }
+
+    /**
+     * SSE 流式推送：元数据事件
+     * Python 解析成功后立即推送标题和字幕数量，前端可提前渲染
+     */
+    private void pushMetadata(String sid, String title, int subtitleCount) {
+        SseEmitter emitter = emitters.get(sid);
+        if (emitter != null) {
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("type", "metadata");
+                payload.put("title", title);
+                payload.put("subtitleCount", subtitleCount);
+                String json = new ObjectMapper().writeValueAsString(payload);
+                emitter.send(SseEmitter.event().name("message").data(json));
+            } catch (Exception e) {
+                log.warn("SSE metadata 推送失败, sid={}", sid);
+                cleanSid(sid);
+            }
+            return;
+        }
+
+        String deadKey = "videomind:sse:dead:" + sid;
+        if (Boolean.TRUE.equals(redisTemplate.hasKey(deadKey))) {
+            log.warn("[PushMetadata] sid={} 已标记死亡，丢弃", sid);
+            return;
+        }
+
+        String targetInstanceId = redisTemplate.opsForValue()
+            .get("videomind:sse:owner:" + sid);
+        if (targetInstanceId == null) {
+            log.warn("[PushMetadata] sid={} 无本地 emitter，且 Redis 无映射，丢弃", sid);
+            return;
+        }
+
+        if (!isInstanceAlive(targetInstanceId)) {
+            log.error("[PushMetadata] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
+            redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofSeconds(30));
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
+
+        ServiceInstance target = findInstance(targetInstanceId);
+        if (target == null) {
+            redisTemplate.delete("videomind:sse:owner:" + sid);
+            return;
+        }
+
+        String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
+        instanceWebClient.post()
+            .uri(targetUrl + "/internal/sse/push")
+            .bodyValue(Map.of(
+                "sid", sid, "type", "metadata",
+                "title", title != null ? title : "",
+                "subtitleCount", subtitleCount
+            ))
+            .retrieve()
+            .toBodilessEntity()
+            .timeout(Duration.ofSeconds(5))
+            .doOnError(e -> {
+                log.error("[PushMetadata] 转发 metadata 到 {} 失败, sid={}", targetUrl, sid, e);
                 redisTemplate.opsForValue().set(deadKey, "CALLBACK_FAILED", Duration.ofSeconds(30));
                 redisTemplate.delete("videomind:sse:owner:" + sid);
             })
@@ -1404,6 +1480,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     @Override
+    public void pushMetadataInternal(String sid, String title, int subtitleCount) {
+        pushMetadata(sid, title, subtitleCount);
+    }
+
+    @Override
     public void pushDoneInternal(String sid, Long videoId, Long conversationId,
                                  String title, String summary, int count) {
         pushDone(sid, videoId, conversationId, title, summary, count);
@@ -1453,7 +1534,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return false;
         }
         try {
-            String ts = redisTemplate.opsForValue().get("videomind:instance:alive" + instanceId);
+            String ts = redisTemplate.opsForValue().get("videomind:instance:alive" + targetInstanceId);
             // 如果该实例不存在
             if(ts == null){
                 return false;
