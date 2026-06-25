@@ -117,6 +117,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     private static final String REDIS_SSE_SUMMARY_PREFIX = "videomind:sse:summary:";
     private static final String REDIS_SSE_CHAT_PREFIX = "videomind:sse:chat:";
     private static final String REDIS_SSE_CONV_PREFIX = "videomind:sse:conv:";
+    private static final String REDIS_CHAT_PENDING_PREFIX = "videomind:sse:chat_pending:";
     private static final String REDIS_VIDEO_AGENT_PREFIX = "videomind:video:agent_id:";
     private static final long REDIS_SSE_TTL_MINUTES = 10;
     private static final String REDIS_LOCK_VIDEO_PREFIX = "videomind:lock:video:";
@@ -1292,6 +1293,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 conversationId + ":" + userMsg.getId(),
                 Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
 
+        // 标记该对话有进行中的 chat，前端切回来时据此重连 SSE
+        redisTemplate.opsForValue().set(
+                REDIS_CHAT_PENDING_PREFIX + conversationId, sid,
+                Duration.ofMinutes(REDIS_SSE_TTL_MINUTES));
+
         // 放入消息队列
         ChatTask task = new ChatTask();
         task.setSid(sid);
@@ -1521,12 +1527,14 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             // 推送 done（携带完整数据）
             pushChatDone(sid, conversationId, answer);
-            // 处理完成，清理断线续传缓冲区
+            // 处理完成，清理断线续传缓冲区和 pending 标记
             unregisterContentBuffer(sid);
+            redisTemplate.delete(REDIS_CHAT_PENDING_PREFIX + conversationId);
 
         } catch (Exception e) {
             log.error("Chat处理失败", e);
             unregisterContentBuffer(sid);
+            redisTemplate.delete(REDIS_CHAT_PENDING_PREFIX + conversationId);
             pushError(sid, e.getMessage());
         }
     }

@@ -16,6 +16,19 @@ export function useChat(messages: Ref<Message[]>) {
     // 当前会话的 sid，用于重连
     let currentSid: string | null = null
 
+    // SSE fetch 的 AbortController，用于切换历史记录时中断旧连接
+    let abortController: AbortController | null = null
+
+    /**
+     * 中断当前 SSE 连接（切换历史记录时调用）
+     */
+    function abort() {
+        if (abortController) {
+            abortController.abort()
+            abortController = null
+        }
+    }
+
     /**
      * 处理从java端返回的每个chunk
      * @param chunk
@@ -145,9 +158,15 @@ export function useChat(messages: Ref<Message[]>) {
         const MAX_RETRIES = 3
         const delays = [1000, 2000, 4000]
 
+        // 创建新的 AbortController（中断旧的）
+        if (abortController) abortController.abort()
+        abortController = new AbortController()
+        const signal = abortController.signal
+
         try {
             const response = await fetch(`/agent/chat/stream?sid=${sessionId}`, {
-                headers: { 'token': token }
+                headers: { 'token': token },
+                signal
             })
             if (!response.ok) throw new Error(`SSE ${response.status}`)
 
@@ -218,5 +237,5 @@ export function useChat(messages: Ref<Message[]>) {
         return new Promise(resolve => setTimeout(resolve, ms))
     }
 
-    return reactive({ isProcess, send, reconnect })
+    return reactive({ isProcess, send, reconnect, abort })
 }

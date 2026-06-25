@@ -135,12 +135,17 @@ async function handleStartSummary() {
 
 async function handleSendMessage(text: string) {
   await chat.send(text, summary.currentConversationId, userStore.token)
+  // 发送 chat 后该对话数据已变（新消息 + pendingChatSid），必须清除缓存
+  if (summary.currentConversationId) {
+    history.invalidateCache(summary.currentConversationId)
+  }
   history.load()
 }
 
 async function handleSelectHistory(id: number) {
   // 用户主动切换上下文：中断旧的 SSE 连接，防止后台流事件覆盖当前视图的数据
   summary.abort()
+  chat.abort()
   clearSseState()
 
   history.activeId = id
@@ -186,6 +191,18 @@ async function handleSelectHistory(id: number) {
       role: 'ai',
       content: renderMarkdown(data.summary || '暂无总结')
     }]
+  }
+
+  // 有进行中的 chat：插入占位符并重连 SSE，继续流式接收 AI 回复
+  if (data.pendingChatSid) {
+    messages.value.push({
+      id: Date.now() + '_ai_placeholder',
+      role: 'ai',
+      isPlaceholder: true,
+      placeholderType: 'chat'
+    })
+    saveSseState({ sid: data.pendingChatSid, type: 'chat', conversationId: id })
+    chat.reconnect(data.pendingChatSid, userStore.token, messages.value.length - 1)
   }
 }
 

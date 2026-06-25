@@ -84,8 +84,9 @@ export function useHistory() {
                     alert('视频解析失败，请重新提交')
                     return null
                 }
-                // 已完成记录写入缓存
-                if (data.status === 1) {
+                // 已完成记录且没有进行中的 chat 才写入缓存
+                // 有 pendingChatSid 说明 chat 还在生成中，数据会变，不能缓存
+                if (data.status === 1 && !data.pendingChatSid) {
                     detailCache.set(id, {
                         data: data,
                         accessOrder: ++accessCounter
@@ -99,6 +100,14 @@ export function useHistory() {
                 alert('加载失败')
                 return null
             }
+        },
+
+        /**
+         * 清除指定对话的缓存
+         * 当用户发送新 chat 或数据发生变化时调用，确保下次 loadDetail 拉取最新数据
+         */
+        invalidateCache(id: number) {
+            detailCache.delete(id)
         }
     })
 

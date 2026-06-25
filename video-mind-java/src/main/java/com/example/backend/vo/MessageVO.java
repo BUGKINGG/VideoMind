@@ -18,6 +18,7 @@ public class MessageVO {
     private Integer part;
     private Integer subtitleCount;
     private List<Message> messages;
-    private String sid;       // 当 status=0 时，用于前端重连 SSE
+    private String sid;       // 当 status=0 时，用于前端重连 SSE（summary）
+    private String pendingChatSid;  // 有进行中的 chat 时，用于前端重连 SSE（chat）
 
 }

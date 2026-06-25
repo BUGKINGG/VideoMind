@@ -126,11 +126,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         MessageVO messageVO = new MessageVO();
         BeanUtils.copyProperties(conversation, messageVO);
 
-        // 处理中的对话：从 Redis 获取 sid，供前端重连 SSE
+        // 处理中的对话：从 Redis 获取 sid，供前端重连 SSE（summary）
         if (conversation != null && conversation.getStatus() == 0) {
             String sid = redisTemplate.opsForValue()
                 .get("videomind:sse:conv:" + id);
             messageVO.setSid(sid);
+        }
+
+        // 检查是否有进行中的 chat，供前端切回来时重连（chat）
+        if (conversation != null) {
+            String chatSid = redisTemplate.opsForValue()
+                .get("videomind:sse:chat_pending:" + id);
+            messageVO.setPendingChatSid(chatSid);
         }
 
         List<Message> list = messageMapper.selectList(
