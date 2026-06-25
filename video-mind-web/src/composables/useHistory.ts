@@ -8,10 +8,22 @@ export interface HistoryItem {
     status: number
 }
 
+/** 前端内存缓存：只缓存已完成记录（数据不变），处理中记录每次重新拉取 */
+interface CacheEntry {
+    data: any
+    accessOrder: number  // LRU 用：越大表示越近访问
+}
+
+const MAX_CACHE_SIZE = 20
+
 /**
  * 历史记录查询功能
  */
 export function useHistory() {
+    /** 缓存已完成对话的 loadDetail 结果，避免频繁查库 */
+    const detailCache = new Map<number, CacheEntry>()
+    let accessCounter = 0
+
     const history = reactive({
         list: [] as HistoryItem[],
         activeId: null as number | null,
@@ -47,7 +59,20 @@ export function useHistory() {
             }
         },
 
+        /**
+         * 加载单条对话详情
+         * - 已完成（status=1）：优先走缓存，数据永不变化
+         * - 处理中（status=0）：不走缓存，每次重新请求获取最新 sid 和状态
+         */
         async loadDetail(id: number): Promise<any> {
+            // 先查缓存
+            const cached = detailCache.get(id)
+            if (cached) {
+                // 已完成记录缓存命中，更新访问顺序
+                cached.accessOrder = ++accessCounter
+                return cached.data
+            }
+
             try {
                 const res = await request.get(`/user/conversation/${id}`)
                 if (res.code !== 200) {
@@ -59,7 +84,15 @@ export function useHistory() {
                     alert('视频解析失败，请重新提交')
                     return null
                 }
-                // status=0（处理中）也返回，前端根据 sid 自动重连 SSE
+                // 已完成记录写入缓存
+                if (data.status === 1) {
+                    detailCache.set(id, {
+                        data: data,
+                        accessOrder: ++accessCounter
+                    })
+                    // 超过容量限制，淘汰最老的
+                    evictIfNeeded()
+                }
                 return data
             } catch (e) {
                 console.error('加载记录失败', e)
@@ -68,6 +101,23 @@ export function useHistory() {
             }
         }
     })
+
+    /** LRU 淘汰：缓存超过 MAX_CACHE_SIZE 时，移除 accessOrder 最小的条目 */
+    function evictIfNeeded() {
+        while (detailCache.size > MAX_CACHE_SIZE) {
+            let minKey: number | null = null
+            let minOrder = Infinity
+            for (const [key, entry] of detailCache) {
+                if (entry.accessOrder < minOrder) {
+                    minOrder = entry.accessOrder
+                    minKey = key
+                }
+            }
+            if (minKey !== null) {
+                detailCache.delete(minKey)
+            }
+        }
+    }
 
     return history
 }
