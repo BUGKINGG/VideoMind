@@ -4,6 +4,7 @@ import { parseSseChunk } from '../utils/sseParser'
 import { renderMarkdown } from '../utils/markdown'
 import request from '../utils/request'
 import type { Message } from '../types/message'
+import { saveSseState, clearSseState } from './sseSession'
 
 export type SummaryStage = 'parsing' | 'summarizing' | 'done'
 
@@ -41,6 +42,53 @@ export function useSummary(messages: Ref<Message[]>) {
                 summary.currentVideoTitle = data.title || summary.currentVideoTitle
                 summary.subtitleCount = data.subtitleCount || 0
                 summary.stage = 'summarizing'
+                return
+            }
+
+            // 断线续传：收到 catchup 事件，将累积内容一次性替换到界面上
+            if (eventName === 'message' && data.type === 'catchup') {
+                if (!data.content) return
+                // 更新元数据
+                if (data.title) summary.currentVideoTitle = data.title
+                if (data.subtitleCount) summary.subtitleCount = data.subtitleCount
+                summary.stage = 'summarizing'
+                stopAnim()
+                // 替换占位符为累积内容
+                const placeholderIndex = messages.value.findIndex(m => m.isPlaceholder)
+                if (placeholderIndex !== -1) {
+                    const msgId = messages.value[placeholderIndex].id
+                    // 如果已经有 streaming 消息（重连场景），替换它
+                    const streamingIdx = messages.value.findIndex(m => m.isStreaming)
+                    if (streamingIdx !== -1) {
+                        messages.value.splice(streamingIdx, 1, {
+                            id: messages.value[streamingIdx].id,
+                            role: 'ai',
+                            content: renderMarkdown(data.content),
+                            rawContent: data.content,
+                            isStreaming: true
+                        })
+                    } else if (placeholderIndex !== -1) {
+                        messages.value.splice(placeholderIndex, 1, {
+                            id: msgId,
+                            role: 'ai',
+                            content: renderMarkdown(data.content),
+                            rawContent: data.content,
+                            isStreaming: true
+                        })
+                    }
+                } else {
+                    // 没有占位符，说明是重连到已有消息
+                    const streamingIdx = messages.value.findIndex(m => m.isStreaming)
+                    if (streamingIdx !== -1) {
+                        messages.value.splice(streamingIdx, 1, {
+                            id: messages.value[streamingIdx].id,
+                            role: 'ai',
+                            content: renderMarkdown(data.content),
+                            rawContent: data.content,
+                            isStreaming: true
+                        })
+                    }
+                }
                 return
             }
 
@@ -95,6 +143,8 @@ export function useSummary(messages: Ref<Message[]>) {
                 }
                 summary.isLoading = false
                 summary.confirmText = '开始总结'
+                // 正常完成，清除会话状态
+                clearSseState()
                 return { type: 'done' }
             }
 
@@ -112,6 +162,8 @@ export function useSummary(messages: Ref<Message[]>) {
                 }
                 summary.isLoading = false
                 summary.confirmText = '开始总结'
+                // 错误结束，清除会话状态
+                clearSseState()
                 return { type: 'error' }
             }
         },
@@ -164,6 +216,9 @@ export function useSummary(messages: Ref<Message[]>) {
                     placeholderType: 'summary'
                 }]
 
+                // 保存会话状态到 sessionStorage，供刷新后恢复
+                saveSseState({ sid: sessionId, type: 'summary' })
+
                 // 启动 SSE，不等待
                 runSSE(sessionId, token)
 
@@ -175,13 +230,31 @@ export function useSummary(messages: Ref<Message[]>) {
                 alert('请求失败: ' + (error.message || '请检查网络或登录状态'))
                 summary.isLoading = false
                 summary.confirmText = '开始总结'
+                clearSseState()
                 return 'error'
             }
+        },
+
+        // 暴露给 Home.vue，用于页面刷新后自动重连
+        reconnect(sessionId: string, token: string) {
+            summary.isLoading = true
+            summary.confirmText = '重连中...'
+            summary.stage = 'parsing'
+            startAnim()
+            messages.value = [{
+                id: Date.now() + '_placeholder',
+                role: 'ai',
+                isPlaceholder: true,
+                placeholderType: 'summary'
+            }]
+            runSSE(sessionId, token)
         }
     })
 
-    // 向后端发送SSE请求
-    async function runSSE(sessionId: string, token: string) {
+    // 向后端发送SSE请求（带指数退避重连）
+    async function runSSE(sessionId: string, token: string, retryCount = 0) {
+        const MAX_RETRIES = 3
+        const delays = [1000, 2000, 4000] // 指数退避
         let isStreamCompleted = false
 
         try {
@@ -222,20 +295,41 @@ export function useSummary(messages: Ref<Message[]>) {
             }
 
             if (!isStreamCompleted) {
+                console.warn('[SSE] 连接中断，未收到 done/error 事件')
+                // 自动重连
+                if (retryCount < MAX_RETRIES) {
+                    console.log(`[SSE] ${delays[retryCount]}ms 后进行第 ${retryCount + 1} 次重连...`)
+                    await sleep(delays[retryCount])
+                    return runSSE(sessionId, token, retryCount + 1)
+                }
                 alert('连接意外中断，视频可能已解析完成，请刷新页面查看历史记录')
             }
 
         } catch (error: any) {
             stopAnim()
             console.error('SSE 异常:', error)
+            // 自动重连
+            if (retryCount < MAX_RETRIES) {
+                console.log(`[SSE] 错误重连，${delays[retryCount]}ms 后进行第 ${retryCount + 1} 次重试...`)
+                await sleep(delays[retryCount])
+                // 重连前重建 SSE 流读取
+                return runSSE(sessionId, token, retryCount + 1)
+            }
+            // 最终失败
             alert('SSE 连接失败: ' + (error.message || '请检查网络'))
         } finally {
-            if (summary.isLoading) {
-                summary.isLoading = false
-                summary.confirmText = '开始总结'
+            if (retryCount >= MAX_RETRIES || isStreamCompleted) {
+                if (summary.isLoading) {
+                    summary.isLoading = false
+                    summary.confirmText = '开始总结'
+                }
+                stopAnim()
             }
-            stopAnim()
         }
+    }
+
+    function sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms))
     }
 
     return summary

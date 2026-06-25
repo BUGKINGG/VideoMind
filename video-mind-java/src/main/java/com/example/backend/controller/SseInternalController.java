@@ -36,6 +36,10 @@ public class SseInternalController {
                     String token = (String) payload.get("token");
                     agentService.pushChunkInternal(sid, token);
                 }
+                case "catchup" -> {
+                    String json = (String) payload.get("json");
+                    agentService.pushCatchupInternal(sid, json);
+                }
                 case "metadata" -> {
                     String title = (String) payload.get("title");
                     Integer subtitleCount = payload.get("subtitleCount") != null

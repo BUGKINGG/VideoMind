@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useUserStore } from '@/stores/user'
 import Sidebar from "@/components/Sidebar.vue";
 import UploadView from '@/components/UploadView.vue'
@@ -62,6 +62,7 @@ import { useChat } from '@/composables/useChat'
 import { renderMarkdown } from '@/utils/markdown'
 import request from '@/utils/request'
 import type { Message } from '@/types/message'
+import { loadSseState } from '@/composables/sseSession'
 
 // ========== 用户数据 ==========
 const userStore = useUserStore()
@@ -168,6 +169,45 @@ async function handleSaveCookie() {
 
 // 初始化
 history.load()
+
+// 页面加载时检查是否有未完成的 SSE 会话，自动重连恢复
+onMounted(() => {
+  const savedState = loadSseState()
+  if (!savedState) return
+
+  // 延迟一下，确保 DOM 和 store 已就绪
+  setTimeout(() => {
+    if (savedState.type === 'summary') {
+      currentView.value = 'chat'
+      summary.reconnect(savedState.sid, userStore.token)
+    } else if (savedState.type === 'chat' && savedState.conversationId) {
+      // Chat 重连：先加载历史消息，再创建占位符，最后重连 SSE
+      currentView.value = 'chat'
+      history.loadDetail(savedState.conversationId).then(data => {
+        if (data && data.messages) {
+          summary.currentConversationId = data.id
+          summary.currentVideoId = data.videoId || null
+          summary.currentVideoTitle = data.title || ''
+          summary.subtitleCount = data.subtitleCount || 0
+          summary.stage = 'done'
+          messages.value = data.messages.map((msg: any, idx: number) => ({
+            id: msg.id || `hist_${idx}_${Date.now()}`,
+            role: msg.role,
+            content: msg.role === 'ai' ? renderMarkdown(msg.content) : msg.content
+          }))
+        }
+        // 创建占位符，等待 AI 流式回复（catchup + chunk）
+        messages.value.push({
+          id: Date.now() + '_ai_placeholder',
+          role: 'ai',
+          isPlaceholder: true,
+          placeholderType: 'chat'
+        })
+        chat.reconnect(savedState.sid, userStore.token, messages.value.length - 1)
+      })
+    }
+  }, 300)
+})
 </script>
 
 <style scoped>

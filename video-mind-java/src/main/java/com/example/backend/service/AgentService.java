@@ -20,6 +20,8 @@ public interface AgentService extends IService<Video> {
 
     void pushChunkInternal(String sid, String token);
 
+    void pushCatchupInternal(String sid, String catchupJson);
+
     void pushMetadataInternal(String sid, String title, int subtitleCount);
 
     void pushDoneInternal(String sid, Long videoId, Long conversationId, String title, String summary, int count);

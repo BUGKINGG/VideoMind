@@ -69,7 +69,7 @@ services:
     container_name: vm-parser
     command: python fetch_video.py
     ports:
-      - "8001:8001"
+      - "18001:8001"
     networks:
       - vm-net
     deploy:
@@ -120,7 +120,7 @@ services:
       - AGENT_SERVICE_URL=http://vm-agent:8765
       - PARSER_SERVICE_URL=http://vm-parser:8001
     ports:
-      - "8080:8080"
+      - "18080:8080"
     depends_on:
       - mysql
       - redis

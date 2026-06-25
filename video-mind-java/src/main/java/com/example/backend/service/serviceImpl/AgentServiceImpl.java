@@ -84,6 +84,15 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     // 维护本实例持有的 sid，用于 @PreDestroy 批量清理
     private final Set<String> localSids = ConcurrentHashMap.newKeySet();
 
+    // 断线续传：sid → 处理实例上的 StringBuilder 引用（与 doProcess/doChatProcess 共享同一对象）
+    private final Map<String, StringBuilder> contentBuffers = new ConcurrentHashMap<>();
+
+    // 断线续传：标记 emitter 已断开，下次 pushChunk 成功时需先推 catchup
+    private final Set<String> pendingCatchup = ConcurrentHashMap.newKeySet();
+
+    // 断线续传元数据：sid → JSON {title, subtitleCount}，在 pushMetadata 时写入
+    private final Map<String, String> catchupMetas = new ConcurrentHashMap<>();
+
     // 看门狗线程池，key: lockKey:lockValue
     private final Map<String, Thread> watchdogThreads = new ConcurrentHashMap<>();
 
@@ -549,16 +558,76 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     /**
+     * 注册 sid 对应的内容缓冲区（doProcess/doChatProcess 启动时调用）
+     */
+    private void registerContentBuffer(String sid, StringBuilder buf) {
+        contentBuffers.put(sid, buf);
+    }
+
+    /**
+     * 注销 sid 对应的内容缓冲区（处理完成时调用）
+     */
+    private void unregisterContentBuffer(String sid) {
+        contentBuffers.remove(sid);
+        pendingCatchup.remove(sid);
+        catchupMetas.remove(sid);
+    }
+
+    /**
+     * 更新 catchup 元数据（标题、字幕数量），在 pushMetadata 时调用
+     */
+    private void updateCatchupMeta(String sid, String title, int subtitleCount) {
+        try {
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("title", title);
+            meta.put("subtitleCount", subtitleCount);
+            catchupMetas.put(sid, new ObjectMapper().writeValueAsString(meta));
+        } catch (Exception e) {
+            log.warn("更新catchup meta失败, sid={}", sid, e);
+        }
+    }
+
+    /**
+     * 向前端补发累积内容（catchup 事件），然后恢复正常流式
+     */
+    private void sendCatchupAndClean(SseEmitter emitter, String sid) throws IOException {
+        StringBuilder buf = contentBuffers.get(sid);
+        if (buf == null) return;
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("type", "catchup");
+        payload.put("content", buf.toString());
+        // 附带元数据
+        String metaJson = catchupMetas.get(sid);
+        if (metaJson != null) {
+            try {
+                Map<String, Object> meta = new ObjectMapper().readValue(metaJson, Map.class);
+                payload.put("title", meta.getOrDefault("title", ""));
+                payload.put("subtitleCount", meta.getOrDefault("subtitleCount", 0));
+            } catch (Exception e) {
+                log.warn("解析 catchup meta 失败", e);
+            }
+        }
+        String json = new ObjectMapper().writeValueAsString(payload);
+        emitter.send(SseEmitter.event().name("message").data(json));
+        pendingCatchup.remove(sid);
+        log.info("[Catchup] 已补发累积内容, sid={}, length={}", sid, buf.length());
+    }
+
+    /**
      * 清理指定 sessionId 的内存数据
      * 防止连接断开后 emitter 和映射关系残留在内存中导致泄漏
      */
     private void cleanSid(String sid) {
+        // emitter 死亡，标记需要补发（下次 pushChunk 发现 emitter 回来时自动 catchup）
+        if (contentBuffers.containsKey(sid)) {
+            pendingCatchup.add(sid);
+        }
         localSids.remove(sid);
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
         lastBusinessDataTime.remove(sid);
         redisTemplate.delete("videomind:sse:address:" + sid);
-        redisTemplate.delete("videomind:sse:summary:" + sid);
+        // 注意：不删除 summary/chat key，保留 TTL 让用户可以重连
         redisTemplate.delete("videomind:sse:dead:" + sid);
     }
 
@@ -713,6 +782,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             processReq.put("user_id", String.valueOf(userId));
 
             StringBuilder summaryBuilder = new StringBuilder();
+            // 注册断线续传缓冲区
+            registerContentBuffer(sid, summaryBuilder);
 
             try {
                 agentWebClient.post()
@@ -749,7 +820,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                                 if (token != null) {
                                     summaryBuilder.append(token);
                                     pushChunk(sid, token);
-                                    // 新增：推送给等待队列，所有等待用户也能看到打字机效果
+                                    // 推送给等待队列，所有等待用户也能看到打字机效果
                                     if (waitingSids != null) {
                                         for (String waitSid : waitingSids) {
                                             if (!waitSid.equals(sid)) {
@@ -829,10 +900,13 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 }
                 redisTemplate.delete("videomind:waiting:" + videoId);
             }
+            // 处理完成，清理断线续传缓冲区
+            unregisterContentBuffer(sid);
 
         } catch (Exception e) {
             // 标记失败，避免前端无限等待
             log.error("视频异步处理失败, videoId={}, sid={}, baseUrl={}, part={}", videoId, sid, baseUrl, part, e);
+            unregisterContentBuffer(sid);
             Video fail = new Video();
             fail.setId(videoId);
             fail.setStatus(2);
@@ -860,6 +934,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         SseEmitter emitter = emitters.get(sid);
         if (emitter != null) {
             try {
+                // 重连后首次推送：先补发累积内容
+                if (pendingCatchup.contains(sid)) {
+                    sendCatchupAndClean(emitter, sid);
+                }
                 Map<String, Object> payload = new HashMap<>();
                 payload.put("type", "chunk");
                 payload.put("content", chunk);
@@ -872,7 +950,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
         // 2. 本地没有，查 Redis 找目标实例
-        String deadKey = "videomind:sse:dead" + sid;
+        String deadKey = "videomind:sse:dead:" + sid;
         if(Boolean.TRUE.equals(redisTemplate.hasKey(deadKey))){
             log.warn("[PushChunk] sid={} 已标记实例死亡，丢弃后续 chunk", sid);
             return;
@@ -880,11 +958,17 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         String targetInstanceId = redisTemplate.opsForValue()
             .get("videomind:sse:owner:" + sid);
         if (targetInstanceId == null) {
-            log.warn("[PushChunk] sid={} 无本地 emitter，且 Redis 无映射，丢弃", sid);
+            // 前端可能正在重连，标记需要补发，不丢弃
+            if (contentBuffers.containsKey(sid)) {
+                pendingCatchup.add(sid);
+                log.info("[PushChunk] sid={} 无 emitter 映射，标记待补发", sid);
+            } else {
+                log.warn("[PushChunk] sid={} 无本地 emitter，且 Redis 无映射，丢弃", sid);
+            }
             return;
         }
 
-        // 3. Redis 心跳优先于 Nacos：25 秒内无心跳直接判死
+        // 3. 25 秒内无心跳直接判死
         if (!isInstanceAlive(targetInstanceId)) {
             log.error("[PushChunk] 目标实例 {} 心跳缺失，标记 sid={} 为死亡", targetInstanceId, sid);
             redisTemplate.opsForValue().set(deadKey, "HEARTBEAT_LOST", Duration.ofSeconds(30));
@@ -898,7 +982,38 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             return;
         }
 
-        // 4. 异步 HTTP POST 转发，不阻塞 LLM 消费线程
+        // 4. 重连后首次推送：先补发累积内容（catchup），再推 chunk
+        if (pendingCatchup.contains(sid) && contentBuffers.containsKey(sid)) {
+            StringBuilder buf = contentBuffers.get(sid);
+            if (buf != null && buf.length() > 0) {
+                try {
+                    Map<String, Object> catchupPayload = new HashMap<>();
+                    catchupPayload.put("type", "catchup");
+                    catchupPayload.put("content", buf.toString());
+                    String metaJson = catchupMetas.get(sid);
+                    if (metaJson != null) {
+                        Map<String, Object> meta = new ObjectMapper().readValue(metaJson, Map.class);
+                        catchupPayload.put("title", meta.getOrDefault("title", ""));
+                        catchupPayload.put("subtitleCount", meta.getOrDefault("subtitleCount", 0));
+                    }
+                    String catchupJson = new ObjectMapper().writeValueAsString(catchupPayload);
+                    String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
+                    instanceWebClient.post()
+                        .uri(targetUrl + "/internal/sse/push")
+                        .bodyValue(Map.of("sid", sid, "type", "catchup", "json", catchupJson))
+                        .retrieve()
+                        .toBodilessEntity()
+                        .timeout(Duration.ofSeconds(5))
+                        .subscribe();
+                    log.info("[PushChunk] 已转发 catchup 到 {} , sid={}, length={}", targetUrl, sid, buf.length());
+                } catch (Exception e) {
+                    log.error("[PushChunk] 构造/转发 catchup 失败, sid={}", sid, e);
+                }
+            }
+            pendingCatchup.remove(sid);
+        }
+
+        // 5. 异步 HTTP POST 转发 chunk，不阻塞 LLM 消费线程
         String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
         instanceWebClient.post()
             .uri(targetUrl + "/internal/sse/push")
@@ -919,6 +1034,9 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * Python 解析成功后立即推送标题和字幕数量，前端可提前渲染
      */
     private void pushMetadata(String sid, String title, int subtitleCount) {
+        // 存入断线续传元数据（无论 emitter 是否在线）
+        updateCatchupMeta(sid, title, subtitleCount);
+
         SseEmitter emitter = emitters.get(sid);
         if (emitter != null) {
             try {
@@ -1237,6 +1355,10 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     private void cleanChatSid(String sid) {
+        // emitter 死亡，标记需要补发
+        if (contentBuffers.containsKey(sid)) {
+            pendingCatchup.add(sid);
+        }
         localSids.remove(sid);
         emitters.remove(sid);
         redisTemplate.delete("videomind:sse:owner:" + sid);
@@ -1277,6 +1399,7 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 videoId, agentVideoId, userId, chatReq);
 
             StringBuilder answerBuilder = new StringBuilder();
+            registerContentBuffer(sid, answerBuilder);  // 注册断线续传缓冲区
 
             try {
                 agentWebClient.post()
@@ -1347,9 +1470,12 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
 
             // 推送 done（携带完整数据）
             pushChatDone(sid, conversationId, answer);
+            // 处理完成，清理断线续传缓冲区
+            unregisterContentBuffer(sid);
 
         } catch (Exception e) {
             log.error("Chat处理失败", e);
+            unregisterContentBuffer(sid);
             pushError(sid, e.getMessage());
         }
     }
@@ -1478,6 +1604,20 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     @Override
     public void pushChunkInternal(String sid, String token) {
         pushChunk(sid, token);
+    }
+
+    @Override
+    public void pushCatchupInternal(String sid, String catchupJson) {
+        // 跨实例转发：直接发送 catchup 事件到本地 emitter
+        SseEmitter emitter = emitters.get(sid);
+        if (emitter != null) {
+            try {
+                emitter.send(SseEmitter.event().name("message").data(catchupJson));
+            } catch (Exception e) {
+                log.warn("SSE catchup 推送失败, sid={}", sid);
+                cleanSid(sid);
+            }
+        }
     }
 
     @Override
