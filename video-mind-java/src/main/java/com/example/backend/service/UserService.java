@@ -36,7 +36,7 @@ public interface UserService extends IService<User> {
      * 获得用户的历史记录列表
      * @return
      */
-    List<Conversation> getList();
+    List<MessageVO> getList();
 
     /**
      * 获得具体的历史对话记录

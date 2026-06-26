@@ -16,6 +16,7 @@ public class MessageVO {
     private Long videoId;
     private String url;
     private Integer part;
+    private String bvid;
     private Integer subtitleCount;
     private List<Message> messages;
     private String sid;       // 当 status=0 时，用于前端重连 SSE（summary）

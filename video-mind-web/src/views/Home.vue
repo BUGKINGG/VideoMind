@@ -25,6 +25,8 @@
           :subtitle-count="summary.subtitleCount"
           :summary-stage="summary.stage"
           :is-process="chat.isProcess"
+          :bvid="summary.bvid"
+          :part="summary.part"
           @back="backToUpload"
           @send="handleSendMessage"
       />
@@ -157,6 +159,8 @@ async function handleSelectHistory(id: number) {
   summary.currentVideoId = data.videoId || null
   summary.currentVideoTitle = data.title || '未命名视频'
   summary.subtitleCount = data.subtitleCount || 0
+  summary.bvid = data.bvid || ''
+  summary.part = data.part || 1
   videoUrl.value = data.url || ''
 
   // 处理中的对话（status=0）：通过 sid 重连 SSE 流
@@ -255,6 +259,8 @@ onMounted(() => {
           summary.currentVideoId = data.videoId || null
           summary.currentVideoTitle = data.title || ''
           summary.subtitleCount = data.subtitleCount || 0
+          summary.bvid = data.bvid || ''
+          summary.part = data.part || 1
           summary.stage = 'done'
           messages.value = data.messages.map((msg: any, idx: number) => ({
             id: msg.id || `hist_${idx}_${Date.now()}`,

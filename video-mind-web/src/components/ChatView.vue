@@ -1,6 +1,12 @@
 <template>
   <div class="chat-view">
-    <ChatHeader :title="currentVideoTitle" :status-text="headerStatusText" @back="$emit('back')" />
+    <ChatHeader
+      :title="currentVideoTitle"
+      :status-text="headerStatusText"
+      :bvid="bvid"
+      :part="part"
+      @back="$emit('back')"
+    />
     <MessageList :messages="messages" ref="messageListRef" />
     <ChatInput v-model="inputMessage" :disabled="isProcess" @send="handleSend" />
   </div>
@@ -19,6 +25,8 @@ const props = defineProps<{
   subtitleCount: number
   summaryStage: string
   isProcess: boolean
+  bvid?: string
+  part?: number
 }>()
 
 const emit = defineEmits<{

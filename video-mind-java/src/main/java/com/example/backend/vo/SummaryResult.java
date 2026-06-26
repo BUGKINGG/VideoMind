@@ -18,4 +18,8 @@ public class SummaryResult {
     private String sessionId;
 
     private Long conversationId;
+
+    private String bvid;
+
+    private Integer part;
 }

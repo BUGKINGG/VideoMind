@@ -2,12 +2,11 @@
   <div class="chat-header">
     <button class="back-btn" @click="$emit('back')">← 返回</button>
     <div class="chat-header-center">
-      <div class="chat-header-icon">🎬</div>
-      <div class="chat-header-info">
-        <h3>{{ title }}</h3>
-        <p>{{ statusText }}</p>
-      </div>
+      <span v-if="bvid" class="meta-bvid">{{ bvid }}</span>
+      <span v-if="part" class="meta-part">p{{ part }}</span>
+      <h3 class="header-title">{{ title }}</h3>
     </div>
+    <p class="header-status">{{ statusText }}</p>
   </div>
 </template>
 
@@ -15,6 +14,8 @@
 defineProps<{
   title: string
   statusText: string
+  bvid?: string
+  part?: number
 }>()
 
 defineEmits(['back'])
@@ -27,34 +28,39 @@ defineEmits(['back'])
   border-bottom: 1px solid #e2e8f0;
   background: #fff;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   min-height: 42px;
+  gap: 1px;
 }
 .chat-header-center {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  max-width: 70%;
+  max-width: 75%;
 }
-.chat-header-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  background: #f1f5f9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
+.meta-bvid {
+  font-size: 11px;
+  color: #6366f1;
+  font-weight: 500;
+  background: #eef2ff;
+  padding: 1px 6px;
+  border-radius: 3px;
   flex-shrink: 0;
 }
-.chat-header-info {
-  min-width: 0;
-  text-align: center;
+.meta-part {
+  font-size: 11px;
+  color: #f59e0b;
+  font-weight: 600;
+  background: #fffbeb;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
 }
-.chat-header-info h3 {
+.header-title {
   font-size: 13px;
   font-weight: 600;
   color: #1e293b;
@@ -63,7 +69,7 @@ defineEmits(['back'])
   text-overflow: ellipsis;
   margin: 0;
 }
-.chat-header-info p {
+.header-status {
   font-size: 11px;
   color: #94a3b8;
   margin: 0;
@@ -71,6 +77,8 @@ defineEmits(['back'])
 .back-btn {
   position: absolute;
   left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
   padding: 4px 10px;
   border: 1px solid #e2e8f0;
   background: #fff;

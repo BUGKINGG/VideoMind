@@ -415,6 +415,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         cache.setTitle(video.getTitle());
         cache.setSummary(video.getSummary());
         cache.setSubtitleCount(video.getSubtitleCount());
+        cache.setPart(video.getPart());
+        cache.setBvid(BilibiliUrlUtils.extractBvid(video.getUrl()));
         if (existConv != null) {
             cache.setConversationId(existConv.getId());
         }
@@ -782,11 +784,11 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             conversationId = earlyConv.getId();
 
             // 字幕解析完成，立即推送 metadata，让前端提前显示标题和字幕数
-            pushMetadata(sid, title, count, conversationId);
+            pushMetadata(sid, title, count, conversationId, bvid, part);
             if (waitingSids != null) {
                 for (String waitSid : waitingSids) {
                     if (!waitSid.equals(sid)) {
-                        pushMetadata(waitSid, title, count, conversationId);
+                        pushMetadata(waitSid, title, count, conversationId, bvid, part);
                     }
                 }
             }
@@ -915,13 +917,13 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
             messageMapper.insert(message);
 
             // 最后推送完成事件，携带完整数据
-            pushDone(sid, videoId, conversationId, title, summary, count);
+            pushDone(sid, videoId, conversationId, title, summary, count, bvid, part);
             // 推送给等待队列
             if (waitingSids != null) {
                 for (String waitSid : waitingSids) {
                     // 避免重复推给原始 sid
                     if (!waitSid.equals(sid)) {
-                        pushDone(waitSid, videoId, conversationId, title, summary, count);
+                        pushDone(waitSid, videoId, conversationId, title, summary, count, bvid, part);
                     }
                 }
                 redisTemplate.delete("videomind:waiting:" + videoId);
@@ -1073,7 +1075,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * SSE 流式推送：元数据事件
      * Python 解析成功后立即推送标题和字幕数量，前端可提前渲染
      */
-    private void pushMetadata(String sid, String title, int subtitleCount, Long conversationId) {
+    private void pushMetadata(String sid, String title, int subtitleCount, Long conversationId,
+                              String bvid, Integer part) {
         // 存入断线续传元数据（无论 emitter 是否在线）
         updateCatchupMeta(sid, title, subtitleCount, conversationId);
 
@@ -1087,6 +1090,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 if (conversationId != null) {
                     payload.put("conversationId", conversationId);
                 }
+                if (bvid != null) payload.put("bvid", bvid);
+                if (part != null) payload.put("part", part);
                 String json = new ObjectMapper().writeValueAsString(payload);
                 emitter.send(SseEmitter.event().name("message").data(json));
             } catch (Exception e) {
@@ -1131,6 +1136,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         if (conversationId != null) {
             body.put("conversationId", conversationId);
         }
+        if (bvid != null) body.put("bvid", bvid);
+        if (part != null) body.put("part", part);
         instanceWebClient.post()
             .uri(targetUrl + "/internal/sse/push")
             .bodyValue(body)
@@ -1150,7 +1157,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
      * 携带完整的视频数据和总结内容，前端收到后标记流式结束
      */
     private void pushDone(String sid, Long videoId, Long conversationId,
-                          String title, String summary, int count) {
+                          String title, String summary, int count,
+                          String bvid, Integer part) {
         SseEmitter emitter = emitters.get(sid);
         if (emitter != null) {
             try {
@@ -1161,6 +1169,8 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
                 payload.put("title", title);
                 payload.put("summary", summary);
                 payload.put("subtitleCount", count);
+                if (bvid != null) payload.put("bvid", bvid);
+                if (part != null) payload.put("part", part);
                 String json = new ObjectMapper().writeValueAsString(payload);
                 emitter.send(SseEmitter.event().name("message").data(json));
                 emitter.complete();
@@ -1195,13 +1205,19 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
         }
 
         String targetUrl = "http://" + target.getHost() + ":" + target.getPort();
+        Map<String, Object> doneBody = new HashMap<>();
+        doneBody.put("sid", sid);
+        doneBody.put("type", "done");
+        doneBody.put("videoId", videoId);
+        doneBody.put("conversationId", conversationId);
+        doneBody.put("title", title);
+        doneBody.put("summary", summary);
+        doneBody.put("subtitleCount", count);
+        if (bvid != null) doneBody.put("bvid", bvid);
+        if (part != null) doneBody.put("part", part);
         instanceWebClient.post()
             .uri(targetUrl + "/internal/sse/push")
-            .bodyValue(Map.of(
-                "sid", sid, "type", "done",
-                "videoId", videoId, "conversationId", conversationId,
-                "title", title, "summary", summary, "subtitleCount", count
-            ))
+            .bodyValue(doneBody)
             .retrieve()
             .toBodilessEntity()
             .timeout(Duration.ofSeconds(5))
@@ -1680,14 +1696,16 @@ public class AgentServiceImpl extends ServiceImpl<VideoMapper, Video> implements
     }
 
     @Override
-    public void pushMetadataInternal(String sid, String title, int subtitleCount, Long conversationId) {
-        pushMetadata(sid, title, subtitleCount, conversationId);
+    public void pushMetadataInternal(String sid, String title, int subtitleCount, Long conversationId,
+                                     String bvid, Integer part) {
+        pushMetadata(sid, title, subtitleCount, conversationId, bvid, part);
     }
 
     @Override
     public void pushDoneInternal(String sid, Long videoId, Long conversationId,
-                                 String title, String summary, int count) {
-        pushDone(sid, videoId, conversationId, title, summary, count);
+                                 String title, String summary, int count,
+                                 String bvid, Integer part) {
+        pushDone(sid, videoId, conversationId, title, summary, count, bvid, part);
     }
 
     @Override

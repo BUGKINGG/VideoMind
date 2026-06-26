@@ -90,9 +90,9 @@ public class UserController {
 
     @GetMapping("/conversation/list")
     @Operation(summary = "获取用户历史记录")
-    public Result<List<Conversation>> conversationList() {
+    public Result<List<MessageVO>> conversationList() {
         log.info("获取历史记录");
-        List<Conversation> list = userService.getList();
+        List<MessageVO> list = userService.getList();
         return Result.success(list);
     }
 

@@ -6,6 +6,8 @@ export interface HistoryItem {
     title: string
     time: string
     status: number
+    bvid: string
+    part: number
 }
 
 /** 前端内存缓存：只缓存已完成记录（数据不变），处理中记录每次重新拉取 */
@@ -51,7 +53,9 @@ export function useHistory() {
                         id: item.id,
                         title: item.title || '未命名视频',
                         time: history.formatTime(item.createdAt),
-                        status: item.status
+                        status: item.status,
+                        bvid: item.bvid || '',
+                        part: item.part || 1
                     }))
                 }
             } catch (e) {

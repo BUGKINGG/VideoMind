@@ -46,7 +46,10 @@ public class SseInternalController {
                         ? Integer.valueOf(payload.get("subtitleCount").toString()) : 0;
                     Long conversationId = payload.get("conversationId") != null
                         ? Long.valueOf(payload.get("conversationId").toString()) : null;
-                    agentService.pushMetadataInternal(sid, title, subtitleCount, conversationId);
+                    String bvid = (String) payload.get("bvid");
+                    Integer part = payload.get("part") != null
+                        ? Integer.valueOf(payload.get("part").toString()) : 1;
+                    agentService.pushMetadataInternal(sid, title, subtitleCount, conversationId, bvid, part);
                 }
                 case "done" -> {
                     Long videoId = payload.get("videoId") != null
@@ -57,7 +60,10 @@ public class SseInternalController {
                     String summary = (String) payload.get("summary");
                     Integer count = payload.get("subtitleCount") != null
                         ? Integer.valueOf(payload.get("subtitleCount").toString()) : 0;
-                    agentService.pushDoneInternal(sid, videoId, conversationId, title, summary, count);
+                    String bvid = (String) payload.get("bvid");
+                    Integer part = payload.get("part") != null
+                        ? Integer.valueOf(payload.get("part").toString()) : 1;
+                    agentService.pushDoneInternal(sid, videoId, conversationId, title, summary, count, bvid, part);
                 }
                 case "error" -> {
                     String msg = (String) payload.get("message");

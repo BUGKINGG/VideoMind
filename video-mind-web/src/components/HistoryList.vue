@@ -15,9 +15,13 @@
         </div>
         <div class="history-meta">
           <div class="history-video-title">{{ item.title }}</div>
-          <div class="history-video-time">
-            <template v-if="item.status === 0">处理中...</template>
-            <template v-else>{{ item.time }}</template>
+          <div class="history-video-sub">
+            <span v-if="item.bvid" class="sub-bvid">{{ item.bvid }}</span>
+            <span v-if="item.part" class="sub-part">p{{ item.part }}</span>
+            <span class="sub-time">
+              <template v-if="item.status === 0">处理中...</template>
+              <template v-else>{{ item.time }}</template>
+            </span>
           </div>
         </div>
       </div>
@@ -43,7 +47,6 @@ defineEmits<{
   flex: 1;
   overflow-y: auto;
   padding: 12px 12px;
-  /* 隐藏滚动条 */
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -74,8 +77,6 @@ defineEmits<{
   border-radius: 10px;
   cursor: pointer;
   transition: all 0.2s;
-  border-bottom: 1px solid transparent;
-  margin-bottom: 2px;
 }
 
 .history-item:hover {
@@ -83,7 +84,6 @@ defineEmits<{
 }
 .history-item.active {
   background: #eef2ff;
-  border-bottom-color: #e0e7ff;
 }
 
 .history-icon {
@@ -104,7 +104,9 @@ defineEmits<{
 .history-meta {
   overflow: hidden;
   flex: 1;
+  min-width: 0;
 }
+
 .history-video-title {
   font-size: 13px;
   color: #1e293b;
@@ -113,10 +115,34 @@ defineEmits<{
   text-overflow: ellipsis;
   font-weight: 500;
 }
-.history-video-time {
-  font-size: 11px;
-  color: #94a3b8;
+
+.history-video-sub {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
   margin-top: 2px;
+  font-size: 11px;
+}
+
+.sub-bvid {
+  color: #6366f1;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.sub-part {
+  color: #f59e0b;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+
+.sub-time {
+  position: absolute;
+  right: 0;
+  color: #94a3b8;
+  flex-shrink: 0;
 }
 
 /* 处理中动画 */

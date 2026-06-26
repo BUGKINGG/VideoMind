@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.backend.common.BaseContext;
+import com.example.backend.common.BilibiliUrlUtils;
 import com.example.backend.dto.LoginDTO;
 import com.example.backend.dto.RegisterDTO;
 import com.example.backend.entity.Conversation;
@@ -105,7 +106,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
-    public List<Conversation> getList(){
+    public List<MessageVO> getList(){
         Long userId = BaseContext.getCurrentId();
         // 包含处理中(status=0)和已完成(status=1)，排除失败(status=2)
         List<Conversation> list = conversationMapper.selectList(
@@ -114,7 +115,19 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 .in(Conversation::getStatus, Arrays.asList(0, 1))
                 .orderByDesc(Conversation::getUpdatedAt)
         );
-        return list;
+        return list.stream().map(conv -> {
+            MessageVO vo = new MessageVO();
+            BeanUtils.copyProperties(conv, vo);
+            // 从 Video 表补充 bvid、part
+            if (conv.getVideoId() != null) {
+                Video video = videoMapper.selectById(conv.getVideoId());
+                if (video != null) {
+                    vo.setPart(video.getPart());
+                    vo.setBvid(BilibiliUrlUtils.extractBvid(video.getUrl()));
+                }
+            }
+            return vo;
+        }).toList();
     }
 
     @Override
@@ -125,6 +138,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         );
         MessageVO messageVO = new MessageVO();
         BeanUtils.copyProperties(conversation, messageVO);
+
+        // 从 Video 表补充 bvid、part、url
+        if (conversation != null && conversation.getVideoId() != null) {
+            Video video = videoMapper.selectById(conversation.getVideoId());
+            if (video != null) {
+                messageVO.setPart(video.getPart());
+                messageVO.setUrl(video.getUrl());
+                messageVO.setBvid(BilibiliUrlUtils.extractBvid(video.getUrl()));
+            }
+        }
 
         // 处理中的对话：从 Redis 获取 sid，供前端重连 SSE（summary）
         if (conversation != null && conversation.getStatus() == 0) {

@@ -19,6 +19,8 @@ export function useSummary(messages: Ref<Message[]>) {
         confirmText: '开始总结',
         stage: 'parsing' as SummaryStage,
         currentVideoTitle: '',
+        bvid: '' as string,
+        part: 1 as number,
         subtitleCount: 0,
         currentConversationId: null as number | null,
         currentVideoId: null as number | null,
@@ -56,6 +58,8 @@ export function useSummary(messages: Ref<Message[]>) {
                 if (data.conversationId) {
                     summary.currentConversationId = data.conversationId
                 }
+                if (data.bvid !== undefined) summary.bvid = data.bvid
+                if (data.part !== undefined) summary.part = data.part
                 return
             }
 
@@ -66,6 +70,8 @@ export function useSummary(messages: Ref<Message[]>) {
                 if (data.title) summary.currentVideoTitle = data.title
                 if (data.subtitleCount) summary.subtitleCount = data.subtitleCount
                 if (data.conversationId) summary.currentConversationId = data.conversationId
+                if (data.bvid !== undefined) summary.bvid = data.bvid
+                if (data.part !== undefined) summary.part = data.part
                 summary.stage = 'summarizing'
                 stopAnim()
                 // 替换占位符为累积内容
@@ -146,6 +152,8 @@ export function useSummary(messages: Ref<Message[]>) {
                 summary.currentConversationId = data.conversationId || null
                 summary.currentVideoId = data.videoId || null
                 summary.stage = 'done'
+                if (data.bvid !== undefined) summary.bvid = data.bvid
+                if (data.part !== undefined) summary.part = data.part
                 // 匹配流式消息或占位符（重连场景下可能是纯 placeholder）
                 const idx = messages.value.findIndex(m => m.isStreaming || m.isPlaceholder)
                 if (idx !== -1) {
@@ -208,6 +216,8 @@ export function useSummary(messages: Ref<Message[]>) {
                     summary.subtitleCount = res.data.subtitleCount || 0
                     summary.currentConversationId = res.data.conversationId || null
                     summary.currentVideoId = res.data.videoId || null
+                    summary.bvid = res.data.bvid || ''
+                    summary.part = res.data.part || 1
                     summary.stage = 'done'
                     messages.value = [{
                         id: Date.now() + '_summary',

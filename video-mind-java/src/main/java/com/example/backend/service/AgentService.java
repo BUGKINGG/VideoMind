@@ -22,9 +22,11 @@ public interface AgentService extends IService<Video> {
 
     void pushCatchupInternal(String sid, String catchupJson);
 
-    void pushMetadataInternal(String sid, String title, int subtitleCount, Long conversationId);
+    void pushMetadataInternal(String sid, String title, int subtitleCount, Long conversationId,
+                              String bvid, Integer part);
 
-    void pushDoneInternal(String sid, Long videoId, Long conversationId, String title, String summary, int count);
+    void pushDoneInternal(String sid, Long videoId, Long conversationId, String title, String summary,
+                          int count, String bvid, Integer part);
 
     void pushErrorInternal(String sid, String message);
 }
