@@ -4,8 +4,8 @@ import Home from "../views/Home.vue";
 import {useUserStore} from "../stores/user.ts";
 
 const routes = [
-    { path: "/", redirect: '/login'},
-    {path:'/login', component: Login},
+    { path: "/", component: Login },
+    { path: "/login", component: Login },
     { path: '/home', component: Home}
 ]
 

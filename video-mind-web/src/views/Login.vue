@@ -1,235 +1,222 @@
-<script setup lang="ts">
-  import {ref} from "vue";
-  import {useRouter} from "vue-router";
-  import request from "../utils/request";
-  import { useUserStore } from "../stores/user.ts";
-
-  const account = ref<string>('');
-  const password = ref<string>('');
-  const currentView = ref('');
-  const password_register = ref('')
-  const password_repeat = ref('')
-  const account_register = ref('')
-  const username_register = ref('')
-  currentView.value = 'login'
-
-  const userStore = useUserStore()
-
-  const router = useRouter();
-
-  const handleLogin = async() => {
-    if(!account.value || !password.value){
-      alert("请输入账号和密码");
-      return;
-    }
-
-    try{
-      const data = await request.post('/user/login', {
-        account: account.value,
-        password: password.value
-      })
-
-      userStore.setUserInfo({
-        token: data.data.token,
-        username: data.data.username,
-        cookie: data.data.cookie || ''
-      })
-      console.log("登入成功", data);
-      await router.push('/home')
-
-    }catch (error){
-      console.error(error);
-    }
-  }
-
-  function registerView(){
-    currentView.value = 'register'
-  }
-
-
-  // 校验规则
-  const isPhone = (v: string) => /^\d{11}$/.test(v)
-  const isPassword = (v: string) => /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{7,}$/.test(v)
-
-  async function register() {
-    // 先清空旧提示
-
-    // 1. 校验手机号
-    if (!account_register.value) {
-      alert("请输入手机号")
-      return
-    }
-    if (!isPhone(account_register.value)) {
-      alert('手机号必须为11位数字')
-      return
-    }
-
-    // 2. 校验密码
-    if (!password_register.value) {
-      alert("请输入密码")
-      return
-    }
-    if (!isPassword(password_register.value)) {
-      alert("密码至少7位，且必须同时包含字母和数字")
-      return
-    }
-
-    // 3. 校验两次密码是否一致
-    if (password_register.value !== password_repeat.value) {
-      alert("两次输入的密码不一")
-      return
-    }
-
-    // 全部通过，执行注册请求
-    const res = await request.post("/user/register", {
-      username: username_register.value,
-      account: account_register.value,
-      password: password_register.value
-    })
-
-    if(res.code === 500){
-      alert("账户已存在")
-      return;
-    }
-
-    if(res.code === 200){
-      alert("注册成功！")
-      currentView.value = 'login'
-      return;
-    }
-  }
-
-  function turnBack() {
-    currentView.value='login'
-  }
-
-</script>
-
 <template>
-  <div class="container">
-    <div v-if="currentView === 'login'" class="card">
-      <h2 class="title">登录账号</h2>
+  <div class="login-page">
+    <AnimatedBackground />
 
-      <div class="form">
-        <div class="form-row">
-          <label>账号：</label>
-          <input class="input" placeholder="请输入账号" v-model="account" @keyup.enter="handleLogin">
-        </div>
-
-        <div class="form-row">
-          <label>密码：</label>
-          <input type="password" class="input" placeholder="请输入密码" v-model="password" @keyup.enter="handleLogin">
-        </div>
-
-        <button class="btn" @click="handleLogin" >登入</button>
-        <button class="btn btn-register" @click="registerView">注册</button>
+    <div class="split-layout">
+      <!-- Left panel: brand hero -->
+      <div class="left-panel">
+        <BrandHero />
       </div>
-    </div>
 
-    <div v-else-if="currentView === 'register'" class="card">
-      <h2 class="title">注册账号</h2>
-      <div class="form">
-
-        <div class="form-row">
-          <label>用户名：</label>
-          <input class="input" placeholder="用户名" v-model="username_register">
+      <!-- Right panel: card with form -->
+      <div class="right-panel">
+        <div class="auth-card">
+          <Transition name="form-switch" mode="out-in">
+            <LoginForm
+              v-if="currentView === 'login'"
+              key="login"
+              :account="loginForm.account"
+              :password="loginForm.password"
+              :loading="loading"
+              :error="errorMsg"
+              @update:account="loginForm.account = $event"
+              @update:password="loginForm.password = $event"
+              @submit="onLogin"
+              @switchToRegister="switchToRegister"
+            />
+            <RegisterForm
+              v-else
+              key="register"
+              :username="registerForm.username"
+              :account="registerForm.account"
+              :password="registerForm.password"
+              :passwordRepeat="registerForm.passwordRepeat"
+              :loading="loading"
+              :error="errorMsg"
+              @update:username="registerForm.username = $event"
+              @update:account="registerForm.account = $event"
+              @update:password="registerForm.password = $event"
+              @update:passwordRepeat="registerForm.passwordRepeat = $event"
+              @submit="onRegister"
+              @switchToLogin="switchToLogin"
+            />
+          </Transition>
         </div>
-
-        <div class="form-row">
-          <label>账号：</label>
-          <input class="input" placeholder="请输入手机号注册" v-model="account_register">
-        </div>
-
-        <div class="form-row">
-          <label>密码：</label>
-          <input type="password" class="input" placeholder="请输入密码，要求大于6位" v-model="password_register">
-        </div>
-
-        <div class="form-row">
-          <label></label>
-          <input type="password" class="input" placeholder="请再次输入密码" v-model="password_repeat">
-        </div>
-
-        <button class="btn" @click="register">注册</button>
-        <button class="btn btn-register" @click="turnBack">返回</button>
       </div>
     </div>
   </div>
 </template>
 
+<script setup lang="ts">
+import { ref, reactive } from 'vue'
+import AnimatedBackground from '../components/landing/AnimatedBackground.vue'
+import BrandHero from '../components/landing/BrandHero.vue'
+import LoginForm from '../components/landing/LoginForm.vue'
+import RegisterForm from '../components/landing/RegisterForm.vue'
+import { useAuth } from '../composables/useAuth'
+
+const { handleLogin, handleRegister } = useAuth()
+
+const currentView = ref<'login' | 'register'>('login')
+const loading = ref(false)
+const errorMsg = ref<string | null>(null)
+
+const loginForm = reactive({
+  account: '',
+  password: '',
+})
+
+const registerForm = reactive({
+  username: '',
+  account: '',
+  password: '',
+  passwordRepeat: '',
+})
+
+function clearError() {
+  errorMsg.value = null
+}
+
+function switchToRegister() {
+  clearError()
+  currentView.value = 'register'
+}
+
+function switchToLogin() {
+  clearError()
+  currentView.value = 'login'
+}
+
+async function onLogin() {
+  clearError()
+  loading.value = true
+  const err = await handleLogin({
+    account: loginForm.account,
+    password: loginForm.password,
+  })
+  loading.value = false
+  if (err) {
+    errorMsg.value = err
+  }
+}
+
+async function onRegister() {
+  clearError()
+  loading.value = true
+  const err = await handleRegister({
+    username: registerForm.username,
+    account: registerForm.account,
+    password: registerForm.password,
+    passwordRepeat: registerForm.passwordRepeat,
+  })
+  loading.value = false
+  if (err) {
+    errorMsg.value = err
+  } else {
+    registerForm.username = ''
+    registerForm.account = ''
+    registerForm.password = ''
+    registerForm.passwordRepeat = ''
+    switchToLogin()
+  }
+}
+</script>
+
 <style scoped>
-.container {
+.login-page {
+  width: 100%;
+  min-height: 100vh;
+  position: relative;
+}
+
+/* ── split layout ── */
+.split-layout {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  background: #f5f5f5;
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 0 24px;
+  gap: 0;
 }
 
-.card {
-  background: white;
-  padding: 40px;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-  width: 400px;
-}
-
-.title {
-  text-align: center;
-  margin-bottom: 30px;
-  color: #333;
-}
-
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.form-row {
+.left-panel {
+  flex: 1 1 5%;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: flex-end;
+  padding-right: 25px;
 }
 
-.form-row label {
-  width: 80px;
-  flex-shrink: 0;
-  color: #555;
+.right-panel {
+  flex: 0 1 45%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-left: 20px;
 }
 
-.input {
-  flex: 1;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  outline: none;
+/* ── card wrapper ── */
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 44px 40px;
+  background: #fff;
+  border: 1px solid #e8ecf1;
+  border-radius: 20px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.04),
+    0 8px 32px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
 }
 
-.input:focus {
-  border-color: #667eea;
+/* ── form transition ── */
+.form-switch-enter-active,
+.form-switch-leave-active {
+  transition: all 0.3s ease;
+}
+.form-switch-enter-from {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.form-switch-leave-to {
+  opacity: 0;
+  transform: translateX(-30px);
 }
 
-.btn {
-  margin-top: 10px;
-  padding: 12px;
-  background: #667eea;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
+/* ── mobile ── */
+@media (max-width: 860px) {
+  .split-layout {
+    flex-direction: column;
+    max-width: 100%;
+    padding: 0;
+  }
+
+  .left-panel {
+    flex: none;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .right-panel {
+    flex: none;
+    padding: 0 24px 48px;
+    justify-content: center;
+  }
+
+  .auth-card {
+    padding: 32px 24px;
+    max-width: 100%;
+  }
 }
 
-.btn:hover {
-  background: #5568d3;
-}
-
-.btn-register {
-  background: rgba(255, 165, 0, 0.8);
-}
-
-.btn-register:hover {
-  background: orange;
+@media (max-width: 480px) {
+  .auth-card {
+    padding: 28px 20px;
+    border-radius: 16px;
+  }
 }
 </style>
