@@ -20,11 +20,21 @@ agent = SimpleAgentService()
 
 
 class AgentWebHandler(SimpleHTTPRequestHandler):
+    """
+    VideoMind 的 HTTP 请求处理器。
+
+    提供以下端点：
+    - GET  /api/health          健康检查
+    - GET  /api/videos          列出已知视频
+    - POST /api/chat/stream     视频问答 SSE 流式接口（带心跳保活）
+    - POST /api/process/stream  视频处理 SSE 流式接口（字幕索引 + 流式总结）
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
     def log_message(self, format: str, *args) -> None:
-        # 后台运行测试服务时不输出每次请求的访问日志
+        """后台运行测试服务时不输出每次请求的访问日志"""
         return
 
     def do_GET(self) -> None:
@@ -68,6 +78,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
 
     def _read_json(self) -> dict:
+        """读取请求体中的 JSON 数据"""
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             print(f"[WARN] Content-Length is 0 or missing, headers={dict(self.headers)}")
@@ -77,12 +88,14 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         return json.loads(raw)
 
     def _required(self, body: dict, key: str) -> str:
+        """从请求体中获取必要参数，缺失则抛出异常"""
         value = str(body.get(key, "")).strip()
         if not value:
             raise ValueError(f"{key} is required")
         return value
 
     def _send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        """发送 JSON 响应"""
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status.value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -92,7 +105,21 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
 
 
     def _handle_chat_stream(self, body: dict) -> None:
-        """对话流式接口：边生成边推 SSE"""
+        """
+        对话流式接口：边生成边推送 SSE 事件。
+
+        流程：
+        1. 加载多层记忆（短期、长期摘要、用户画像、相关历史记忆）
+        2. 检索相关视频字幕块
+        3. 流式生成回答（SSE 推送逐 token）
+        4. 保存对话并触发记忆后处理
+
+        SSE 事件格式：
+        - data: {"type":"chunk","content":"..."}   增量 token
+        - data: :ping                               心跳保活（每 5 秒）
+        - data: {"type":"done","answer":"...",...}  完成信号
+        - data: {"type":"error","message":"..."}    错误
+        """
         user_id = str(body.get("user_id", "__shared__"))
         session_id = str(body.get("session_id", "default"))
         video_id = body.get("video_id")
@@ -109,12 +136,16 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
 
-        # 用于停止 ping 线程
+        # 用于停止 ping 线程的事件和线程安全的写锁
         stop_event = threading.Event()
         write_lock = threading.Lock()
 
         def ping_worker():
-            """独立线程：每 5 秒发送 SSE 保活注释，不依赖 LLM 生成循环"""
+            """
+            独立线程：每 5 秒发送 SSE 保活注释 `:ping`。
+            防止反向代理/客户端因长时间无数据而断开连接。
+            检测到连接断开（BrokenPipeError 等）时自动退出。
+            """
             while not stop_event.is_set():
                 try:
                     time.sleep(5)
@@ -135,11 +166,14 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         ping_thread.start()
 
         try:
-            # 加载上下文
+            # ===== 1. 加载多层记忆上下文 =====
             print(f"[DEBUG] /api/chat/stream received: user_id={user_id}, session_id={session_id}, video_id={video_id}, question={question[:30]}")
             resolved_owner = agent._ensure_video_loaded(video_id, user_id)
             print(f"[DEBUG] resolved_owner={resolved_owner}")
+
             transcript = agent.transcript_store.get_transcript(video_id, resolved_owner)
+
+            # 检索相关视频字幕块（RAG）
             chunks = agent.find_relevant_video_chunks(
                 user_id=user_id,
                 video_id=video_id,
@@ -147,17 +181,46 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                 transcript_owner_user_id=resolved_owner,
             )
             print(f"[DEBUG] retrieved {len(chunks)} chunks")
+
+            # 短期记忆
+            conversation_key = f"{user_id}:{session_id}:{video_id}"
             history = agent._get_or_load_history(
-                f"{user_id}:{session_id}:{video_id}",
+                conversation_key,
                 user_id=user_id,
                 session_id=session_id,
                 video_id=video_id,
             )
 
-            # 流式生成
-            full_answer = []
+            # 长期记忆摘要
+            memory_summary = agent._get_or_load_memory_summary(
+                conversation_key,
+                user_id=user_id,
+                session_id=session_id,
+                video_id=video_id,
+            )
+
+            # 用户画像
+            user_profile = agent._get_or_load_user_profile(user_id)
+
+            # 相关历史对话记忆（向量检索 + Rerank）
+            memories = agent.find_relevant_conversation_memories(
+                user_id=user_id,
+                video_id=video_id,
+                question=question,
+            )
+
+            # 视频总结
             summary = agent.video_repository.load_summary(video_id, resolved_owner)
-            for token in agent.video_qa.answer_stream(transcript, question, chunks, history, summary=summary):
+
+            # ===== 2. 流式生成 =====
+            full_answer = []
+            for token in agent.video_qa.answer_stream(
+                transcript, question, chunks, history,
+                summary=summary,
+                memory_summary=memory_summary,
+                user_profile=user_profile,
+                relevant_memories=memories,
+            ):
                 full_answer.append(token)
                 payload = json.dumps({
                     "type": "chunk",
@@ -167,16 +230,18 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
 
-            # 保存对话（流结束后）
+            # ===== 3. 保存对话并触发所有记忆后处理 =====
             answer = "".join(full_answer)
-            user_turn = ChatTurn(role="user", content=question)
-            assistant_turn = ChatTurn(role="assistant", content=answer)
-            history.append(user_turn)
-            history.append(assistant_turn)
-            agent.conversation_repository.add_turn(user_id, session_id, user_turn, video_id=video_id)
-            agent.conversation_repository.add_turn(user_id, session_id, assistant_turn, video_id=video_id)
+            agent.record_conversation_turns(
+                user_id=user_id,
+                session_id=session_id,
+                history=history,
+                user_content=question,
+                assistant_content=answer,
+                video_id=video_id,
+            )
 
-            # 推 done
+            # ===== 4. 推送 done 事件 =====
             done_payload = json.dumps({
                 "type": "done",
                 "answer": answer,
@@ -188,6 +253,15 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
                         "end_time": chunk.end_time,
                     }
                     for chunk in chunks
+                ],
+                "memories": [
+                    {
+                        "memory_id": memory.memory_id,
+                        "session_id": memory.session_id,
+                        "video_id": memory.video_id,
+                        "content": memory.content,
+                    }
+                    for memory in memories
                 ],
             }, ensure_ascii=False)
             with write_lock:
@@ -203,7 +277,15 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
             ping_thread.join(timeout=2)
 
     def _handle_process_stream(self, body: dict) -> None:
-        """视频处理流式接口：存字幕 → 索引 → 流式总结"""
+        """
+        视频处理流式接口：存字幕 → 向量索引 → 流式总结。
+
+        SSE 事件格式：
+        - data: {"type":"chunk","content":"..."}   增量 token
+        - data: :ping                               心跳保活（每 5 秒）
+        - data: {"type":"done","video_id":"...",...} 完成信号（含完整总结）
+        - data: {"type":"error","message":"..."}    错误
+        """
         video_id = self._required(body, "video_id")
         title = self._required(body, "title")
         transcript_text = self._required(body, "transcript_text")
@@ -217,12 +299,16 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
 
-        # 用于停止 ping 线程
+        # 用于停止 ping 线程的事件和线程安全的写锁
         stop_event = threading.Event()
         write_lock = threading.Lock()
 
         def ping_worker():
-            """独立线程：每 5 秒发送 SSE 保活注释，不依赖 LLM 生成循环"""
+            """
+            独立线程：每 5 秒发送 SSE 保活注释 `:ping`。
+            防止反向代理/客户端因长时间无数据而断开连接。
+            检测到连接断开（BrokenPipeError 等）时自动退出。
+            """
             while not stop_event.is_set():
                 try:
                     time.sleep(5)
@@ -241,7 +327,7 @@ class AgentWebHandler(SimpleHTTPRequestHandler):
         ping_thread.start()
 
         try:
-            # 1. 存字幕
+            # 1. 存字幕（支持带时间戳的 segments 和纯文本两种模式）
             if segments is not None and len(segments) > 0:
                 agent.add_video_transcript_with_segments(
                     video_id=video_id, title=title, segments=segments, owner_user_id=user_id

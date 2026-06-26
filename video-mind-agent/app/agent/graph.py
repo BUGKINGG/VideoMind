@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.models import ChatTurn, TranscriptChunk
+from app.models import ChatTurn, ConversationMemory, TranscriptChunk
 from app.services.intent_classifier import VIDEO_QA, VIDEO_SUMMARY, IntentClassifier
 
 if TYPE_CHECKING:
@@ -12,45 +12,66 @@ if TYPE_CHECKING:
 
 
 class AgentGraphState(TypedDict, total=False):
+    """
+    LangGraph 状态图中流转的状态字典。
+
+    包含多层记忆的完整上下文：
+    - history:            短期记忆（最近 12 条对话）
+    - memory_summary:     长期记忆摘要（LLM 定期压缩的对话历史）
+    - user_profile:       用户画像（偏好与身份信息）
+    - retrieved_memories: 检索到的相关历史对话记忆
+    - retrieved_chunks:   检索到的相关视频字幕块
+    """
     user_id: str
     session_id: str
     video_id: str
     message: str
+
     intent: str
     resolved_owner_user_id: str
     history: list[ChatTurn]
+    memory_summary: str
+    user_profile: str
+    retrieved_memories: list[ConversationMemory]
     retrieved_chunks: list[TranscriptChunk]
     answer: str
     route: str
 
 
 class AgentGraphRunner:
+    """
+    基于 LangGraph 的视频对话编排器。
+
+    状态流程图：
+        START -> load_context -> classify_intent
+                              /              \\
+                     video_summary       video_qa
+                              \\              /
+                               save_conversation
+                                      |
+                                     END
+
+    load_context 节点负责加载所有记忆层：
+    视频数据 + 短期记忆 + 长期摘要 + 用户画像
+    """
+
     def __init__(self, service: "SimpleAgentService") -> None:
         self.service = service
 
-        # 就是靠匹配有没有“总结”这些字符出现，以此判断是总结还是视频问答
+        # 基于关键词匹配判断意图：总结 or 问答
         self.intent_classifier = IntentClassifier()
         self.graph = self._build_graph()
 
     def run(self, state: AgentGraphState) -> AgentGraphState:
-        '''
-        TODO:目前还是非流式输出，以后可以改成流式
-        :param state:
-        :return:
-        '''
+        """
+        运行 LangGraph 状态图，返回最终状态（包含 answer 等）
+        """
         return self.graph.invoke(state)
 
     def _build_graph(self):
-        '''
-        load_context -> clssify_intent
-                       /              \
-                video_summary       video_qa
-                       \              /
-                       save_conversation
-                              |
-                             END
-        :return:
-        '''
+        """
+        构建并编译 LangGraph 状态图
+        """
         graph = StateGraph(AgentGraphState)
         graph.add_node("load_context", self.load_context)
         graph.add_node("classify_intent", self.classify_intent)
@@ -74,11 +95,15 @@ class AgentGraphRunner:
         return graph.compile()
 
     def load_context(self, state: AgentGraphState) -> AgentGraphState:
-        '''
-        加载上下文（短期记忆）
-        :param state:
-        :return:
-        '''
+        """
+        加载上下文节点：从 SQLite / 内存缓存恢复所有记忆层。
+
+        加载内容：
+        - 视频数据（字幕 + 切块）
+        - 短期记忆（对话历史，最近 12 条）
+        - 长期记忆摘要
+        - 用户画像
+        """
         resolved_owner_user_id = self.service._ensure_video_loaded(
             video_id=state["video_id"],
             owner_user_id=state["user_id"],
@@ -88,44 +113,57 @@ class AgentGraphRunner:
             session_id=state["session_id"],
             video_id=state["video_id"],
         )
+        # 短期记忆（最近 12 条对话记录）
         history = self.service._get_or_load_history(
             conversation_key=conversation_key,
             user_id=state["user_id"],
             session_id=state["session_id"],
             video_id=state["video_id"],
         )
+        # 长期记忆摘要
+        memory_summary = self.service._get_or_load_memory_summary(
+            conversation_key=conversation_key,
+            user_id=state["user_id"],
+            session_id=state["session_id"],
+            video_id=state["video_id"],
+        )
+        # 用户画像
+        user_profile = self.service._get_or_load_user_profile(state["user_id"])
         return {
             **state,
             "resolved_owner_user_id": resolved_owner_user_id,
+            "memory_summary": memory_summary,
+            "user_profile": user_profile,
             "history": history,
         }
 
     def classify_intent(self, state: AgentGraphState) -> AgentGraphState:
-        '''
-        判断user的message里也没有类似“总结”的字眼
-        :param state:
-        :return:
-        '''
+        """
+        意图分类节点：判断用户是想做视频总结还是视频问答
+        """
         intent = self.intent_classifier.classify(state["message"])
         return {**state, "intent": intent, "route": intent}
 
     def route_by_intent(self, state: AgentGraphState) -> str:
-        '''
-        有总结之类的字眼就转向summary_node
-        :param state:
-        :return:
-        '''
+        """根据意图路由到不同子图"""
         return state.get("intent", VIDEO_QA)
 
     def video_qa(self, state: AgentGraphState) -> AgentGraphState:
+        """
+        视频问答节点：RAG 检索 + 多层记忆上下文 + LLM 生成回答。
+
+        检索流程：
+        1. 从 Qdrant 检索相关视频字幕块
+        2. 从 Qdrant 检索相关历史对话记忆
+        3. 从 SQLite 加载视频总结
+        4. 将所有记忆层注入 VideoQA.build_prompt()
+        """
         transcript = self.service.transcript_store.get_transcript(
             state["video_id"],
             owner_user_id=state["resolved_owner_user_id"],
         )
 
-        '''
-        在向量数据库中查找最相关的一些字幕，相当于RAG架构的一部分
-        '''
+        # 在 Qdrant 中检索相关视频字幕块
         retrieved_chunks = self.service.find_relevant_video_chunks(
             user_id=state["user_id"],
             video_id=state["video_id"],
@@ -133,21 +171,43 @@ class AgentGraphRunner:
             transcript_owner_user_id=state["resolved_owner_user_id"],
         )
 
+        # 在 Qdrant 中检索相关历史对话记忆
+        retrieved_memories = self.service.find_relevant_conversation_memories(
+            user_id=state["user_id"],
+            video_id=state["video_id"],
+            question=state["message"],
+        )
+
+        # 加载已有的视频总结
         summary = self.service.video_repository.load_summary(
             state["video_id"],
             owner_user_id=state["resolved_owner_user_id"],
         )
 
+        # 生成回答（注入全部记忆层）
         answer = self.service.video_qa.answer(
             transcript=transcript,
             question=state["message"],
             relevant_chunks=retrieved_chunks,
             history=state.get("history", []),
             summary=summary,
+            memory_summary=state.get("memory_summary", ""),
+            user_profile=state.get("user_profile", ""),
+            relevant_memories=retrieved_memories,
         )
-        return {**state, "answer": answer, "retrieved_chunks": retrieved_chunks}
+        return {
+            **state,
+            "answer": answer,
+            "retrieved_chunks": retrieved_chunks,
+            "retrieved_memories": retrieved_memories,
+        }
 
     def video_summary(self, state: AgentGraphState) -> AgentGraphState:
+        """
+        视频总结节点：生成视频的结构化摘要并持久化。
+
+        持久化后问答节点可以加载并引用该总结。
+        """
         summary_result = self.service.summarize_video(
             video_id=state["video_id"],
             owner_user_id=state["resolved_owner_user_id"],
@@ -161,25 +221,20 @@ class AgentGraphRunner:
             owner_user_id=state["resolved_owner_user_id"],
         )
 
-        return {**state, "answer": summary, "retrieved_chunks": []}
+        return {**state, "answer": summary, "retrieved_chunks": [], "retrieved_memories": []}
 
     def save_conversation(self, state: AgentGraphState) -> AgentGraphState:
+        """
+        保存对话节点：统一调用 record_conversation_turns 保存对话，
+        并自动触发记忆索引、摘要更新、画像更新。
+        """
         history = state.get("history", [])
-        user_turn = ChatTurn(role="user", content=state["message"])
-        assistant_turn = ChatTurn(role="assistant", content=state["answer"])
-
-        history.append(user_turn)
-        history.append(assistant_turn)
-        self.service.conversation_repository.add_turn(
-            state["user_id"],
-            state["session_id"],
-            user_turn,
-            video_id=state["video_id"],
-        )
-        self.service.conversation_repository.add_turn(
-            state["user_id"],
-            state["session_id"],
-            assistant_turn,
+        history = self.service.record_conversation_turns(
+            user_id=state["user_id"],
+            session_id=state["session_id"],
+            history=history,
+            user_content=state["message"],
+            assistant_content=state["answer"],
             video_id=state["video_id"],
         )
         return {**state, "history": history}

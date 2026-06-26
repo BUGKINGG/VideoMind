@@ -48,11 +48,24 @@ const props = defineProps<{
   messages: Message[]
 }>()
 
+
+
 const container = ref<HTMLElement | null>(null)
 const dots = ref(1)
 const showScrollTopBtn = ref(false)
 const showScrollBottomBtn = ref(false)
+const isNearBottom = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
+
+function checkIsNearBottom() {
+  return isNearBottom.value
+}
+
+defineExpose({
+  scrollToBottom,
+  container,
+  checkIsNearBottom
+})
 
 const placeholderText = computed(() => {
   const placeholder = props.messages.find(m => m.isPlaceholder)
@@ -73,7 +86,9 @@ watch(() => props.messages.find(m => m.isPlaceholder), (hasPlaceholder) => {
 }, { immediate: true, deep: true })
 
 watch(() => props.messages, () => {
-  scrollToBottom()
+  if(isNearBottom.value){
+    scrollToBottom()
+  }
   nextTick(() => checkScrollPosition())
 }, { deep: true })
 
@@ -82,6 +97,7 @@ function checkScrollPosition() {
   if (!el) return
   const nearTop = el.scrollTop < 80
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  isNearBottom.value = nearBottom
   showScrollTopBtn.value = !nearTop
   showScrollBottomBtn.value = !nearBottom
 }
@@ -105,7 +121,6 @@ function scrollToBottom() {
   }
 }
 
-defineExpose({ scrollToBottom, container })
 </script>
 
 <style scoped>

@@ -14,7 +14,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import {ref, computed, nextTick} from 'vue'
 import ChatHeader from './ChatHeader.vue'
 import MessageList from './MessageList.vue'
 import ChatInput from './ChatInput.vue'
@@ -37,6 +37,7 @@ const emit = defineEmits<{
 }>()
 
 const inputMessage = ref('')
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 
 const headerStatusText = computed(() => {
   if (props.summaryStage === 'done') return `总结完成 • 已提取 ${props.subtitleCount} 条字幕片段`
@@ -47,6 +48,11 @@ const headerStatusText = computed(() => {
 function handleSend() {
   if (!inputMessage.value.trim()) return
   emit('send', inputMessage.value)
+  nextTick(() =>{
+    if(messageListRef.value?.checkIsNearBottom()){
+      messageListRef.value?.scrollToBottom()
+    }
+  })
   inputMessage.value = ''
 }
 </script>
