@@ -1,15 +1,20 @@
 <template>
   <div class="chat-input-area">
-    <div class="chat-input-wrapper">
+    <div class="chat-input-pill">
       <textarea
           :value="modelValue"
           @input="handleInput"
           class="chat-input"
           rows="1"
-          placeholder="询问关于视频的任何问题，或要求 AI 截取特定时间戳分析..."
+          placeholder="询问关于视频的任何问题..."
           @keydown.enter.prevent="handleSend"
       ></textarea>
-      <button class="send-btn" @click="handleSend" :disabled="disabled">➤</button>
+      <button class="send-btn" @click="handleSend" :disabled="disabled">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="19" x2="12" y2="5"/>
+          <polyline points="5 12 12 5 19 12"/>
+        </svg>
+      </button>
     </div>
   </div>
 </template>
@@ -52,19 +57,27 @@ function autoResize(textarea: HTMLTextAreaElement) {
 
 <style scoped>
 .chat-input-area {
-  padding: 16px 24px;
-  background: var(--bg-chat);
-  border-top: 1px solid var(--border);
+  padding: 12px 24px 16px;
 }
-.chat-input-wrapper {
+
+.chat-input-pill {
+  max-width: 720px;
+  margin: 0 auto;
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: flex-end;
-  background: var(--bg-main);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  padding: 8px 8px 8px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 2px 12px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
+.chat-input-pill:focus-within {
+  border-color: #c0c8d4;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 20px rgba(0, 0, 0, 0.08);
+}
+
 .chat-input {
   flex: 1;
   border: none;
@@ -75,28 +88,36 @@ function autoResize(textarea: HTMLTextAreaElement) {
   max-height: 120px;
   font-family: inherit;
   line-height: 1.5;
+  padding: 4px 0;
+  color: #1e293b;
 }
 .chat-input::placeholder {
-  color: var(--text-muted);
+  color: #94a3b8;
 }
+
 .send-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: black;
-  color: white;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #1e293b;
+  color: #fff;
   border: none;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.2s;
+  transition: background 0.15s;
+}
+.send-btn svg {
+  width: 16px;
+  height: 16px;
 }
 .send-btn:enabled:hover {
-  background: #2d2d2d;
+  background: #334155;
 }
 .send-btn:disabled {
-  background: #b41010;
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 </style>

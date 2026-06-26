@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-messages" ref="container">
+  <div class="chat-messages" ref="container" @scroll="onScroll">
     <div
         v-for="msg in messages"
         :key="msg.id"
@@ -15,6 +15,28 @@
         <div v-else>{{ msg.content }}</div>
       </div>
     </div>
+
+    <!-- 两个箭头都在右下角，↑ 在上 ↓ 在下 -->
+    <button
+        class="scroll-btn scroll-top-btn"
+        :class="{ visible: showScrollTopBtn }"
+        @click="scrollToTop"
+        aria-label="滚动到顶部"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="18 15 12 9 6 15"/>
+      </svg>
+    </button>
+    <button
+        class="scroll-btn scroll-bottom-btn"
+        :class="{ visible: showScrollBottomBtn }"
+        @click="scrollToBottom"
+        aria-label="滚动到底部"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+    </button>
   </div>
 </template>
 
@@ -28,6 +50,8 @@ const props = defineProps<{
 
 const container = ref<HTMLElement | null>(null)
 const dots = ref(1)
+const showScrollTopBtn = ref(false)
+const showScrollBottomBtn = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 const placeholderText = computed(() => {
@@ -50,12 +74,35 @@ watch(() => props.messages.find(m => m.isPlaceholder), (hasPlaceholder) => {
 
 watch(() => props.messages, () => {
   scrollToBottom()
+  nextTick(() => checkScrollPosition())
 }, { deep: true })
 
+function checkScrollPosition() {
+  const el = container.value
+  if (!el) return
+  const nearTop = el.scrollTop < 80
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  showScrollTopBtn.value = !nearTop
+  showScrollBottomBtn.value = !nearBottom
+}
+
+function onScroll() {
+  checkScrollPosition()
+}
+
+function scrollToTop() {
+  if (container.value) {
+    container.value.scrollTo({ top: 0, behavior: 'smooth' })
+    // smooth 滚动结束后再检查一次
+    setTimeout(() => checkScrollPosition(), 400)
+  }
+}
+
 function scrollToBottom() {
-  nextTick(() => {
-    if (container.value) container.value.scrollTop = container.value.scrollHeight
-  })
+  if (container.value) {
+    container.value.scrollTo({ top: container.value.scrollHeight, behavior: 'smooth' })
+    setTimeout(() => checkScrollPosition(), 400)
+  }
 }
 
 defineExpose({ scrollToBottom, container })
@@ -65,14 +112,15 @@ defineExpose({ scrollToBottom, container })
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
-  background: var(--bg-main);
+  padding: 32px 48px;
+  position: relative;
 }
+
 .message {
   display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
-  max-width: 80%;
+  gap: 14px;
+  margin-bottom: 36px;
+  max-width: 75%;
 }
 .message.user {
   margin-left: auto;
@@ -90,39 +138,86 @@ defineExpose({ scrollToBottom, container })
   font-weight: 600;
 }
 .message.ai .message-avatar {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  background: #1e293b;
+  color: #fff;
 }
 .message.user .message-avatar {
   background: #e2e8f0;
-  color: var(--text-secondary);
+  color: #64748b;
 }
 .message-content {
-  background: white;
+  background: #fff;
   padding: 16px 20px;
   border-radius: 12px;
-  border: 1px solid var(--border);
-  font-size: 18px;
+  border: 1px solid #e2e8f0;
+  font-size: 16px;
   line-height: 1.8;
-  box-shadow: var(--shadow);
   text-align: left;
-  width: 100%;
-  color: var(--text-primary);
+  color: #1e293b;
+  overflow-wrap: break-word;
 }
 .placeholder-message {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 .placeholder-main {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.8;
-  color: var(--text-primary);
+  color: #64748b;
   white-space: pre-line;
 }
 .message.user .message-content {
-  background: #ffffff;
-  color: #1f2937;
-  border: 1px solid #e5e7eb;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+}
+
+/* ── shared scroll buttons ── */
+.scroll-btn {
+  position: sticky;
+  left: calc(100% - 54px);
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #64748b;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 10;
+  transition: opacity 0.25s, transform 0.25s;
+}
+.scroll-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.scroll-btn:hover {
+  background: #f8fafc;
+  color: #1e293b;
+  border-color: #cbd5e1;
+}
+.scroll-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.scroll-top-btn {
+  bottom: 62px;   /* 16px + 38px + 8px gap */
+  transform: translateY(-8px);
+}
+.scroll-top-btn.visible {
+  transform: translateY(0);
+}
+
+.scroll-bottom-btn {
+  bottom: 16px;
+  transform: translateY(8px);
+}
+.scroll-bottom-btn.visible {
+  transform: translateY(0);
 }
 </style>

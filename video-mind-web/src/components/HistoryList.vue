@@ -42,39 +42,53 @@ defineEmits<{
 .history-section {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 12px;
+  padding: 12px 12px;
+  /* 隐藏滚动条 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.history-section::-webkit-scrollbar {
+  display: none;
+}
+
 .history-title {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: #94a3b8;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 0 8px 12px;
+  letter-spacing: 0.08em;
+  padding: 0 8px 10px;
 }
+
 .history-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
+
 .history-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 8px;
-  border-radius: 8px;
+  padding: 10px 10px;
+  border-radius: 10px;
   cursor: pointer;
   transition: all 0.2s;
+  border-bottom: 1px solid transparent;
+  margin-bottom: 2px;
 }
+
 .history-item:hover {
   background: #f1f5f9;
 }
 .history-item.active {
   background: #eef2ff;
+  border-bottom-color: #e0e7ff;
 }
+
 .history-icon {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
   background: #f1f5f9;
   display: flex;
@@ -86,13 +100,14 @@ defineEmits<{
 .history-item.active .history-icon {
   background: #c7d2fe;
 }
+
 .history-meta {
   overflow: hidden;
   flex: 1;
 }
 .history-video-title {
   font-size: 13px;
-  color: var(--text-primary);
+  color: #1e293b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -100,16 +115,17 @@ defineEmits<{
 }
 .history-video-time {
   font-size: 11px;
-  color: var(--text-muted);
+  color: #94a3b8;
   margin-top: 2px;
 }
+
 /* 处理中动画 */
 .processing-spinner {
   display: inline-block;
   width: 14px;
   height: 14px;
   border: 2px solid #e2e8f0;
-  border-top-color: var(--primary);
+  border-top-color: #6366f1;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }

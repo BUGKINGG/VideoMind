@@ -3,7 +3,6 @@
     <div class="avatar">{{ initials }}</div>
     <div class="profile-info">
       <div class="profile-name">{{ userName }}</div>
-      <div class="profile-uid">UID: {{ userUid }}</div>
     </div>
     <button class="option-btn" @click="$emit('turnToOptions')">设置</button>
   </div>
@@ -50,35 +49,31 @@ defineEmits(['turnToOptions'])
 }
 .profile-info {
   overflow: hidden;
+  flex: 1;
 }
 .profile-name {
   font-size: 15px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: #1e293b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.profile-uid {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
 .option-btn {
   background: white;
   border: none;
-  font-size: 15px;
-  color: #757474;
-  border-radius: 12px;
-  transition-duration: 0.2s;
-  margin-left: 50px;
-  width: 50px;
-  height: 30px;
+  font-size: 14px;
+  color: #94a3b8;
+  border-radius: 8px;
+  transition: all 0.2s;
+  padding: 4px 10px;
+  cursor: pointer;
 }
 .option-btn:hover {
-  background: #e8e5e5;
+  background: #f1f5f9;
+  color: #64748b;
 }
 .option-btn:active {
-  transform: translateY(-3px);
+  transform: translateY(-1px);
 }
 </style>

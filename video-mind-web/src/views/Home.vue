@@ -285,8 +285,8 @@ onMounted(() => {
 
 :root {
   --sidebar-width: 260px;
-  --primary: #4f46e5;
-  --primary-hover: #4338ca;
+  --primary: #1e293b;
+  --primary-hover: #334155;
   --bg-main: #f8fafc;
   --bg-sidebar: #ffffff;
   --bg-chat: #ffffff;
@@ -295,8 +295,8 @@ onMounted(() => {
   --text-secondary: #64748b;
   --text-muted: #94a3b8;
   --radius: 12px;
-  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+  --shadow-lg: 0 4px 16px -2px rgb(0 0 0 / 0.06), 0 2px 8px -2px rgb(0 0 0 / 0.04);
 }
 
 .app-container {
@@ -304,7 +304,7 @@ onMounted(() => {
   height: 100vh;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
   'Helvetica Neue', Arial, sans-serif;
-  background: var(--bg-main);
+  background: #f8fafc;
   color: var(--text-primary);
   overflow: hidden;
 }
@@ -315,54 +315,55 @@ onMounted(() => {
   flex-direction: column;
   overflow: hidden;
   position: relative;
+  background: #f8fafc;
 }
 
-/* ========== Markdown 全局样式（v-html 穿透） ========== */
+/* ========== Markdown 全局样式 ========== */
 :deep(.markdown-body),
 :deep(.markdown-body *) {
   text-align: left !important;
 }
 
 :deep(.markdown-body) {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1.8;
   color: var(--text-primary);
   word-break: break-word;
 }
 
 :deep(.markdown-body h1) {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
-  margin: 20px 0 10px;
-  padding-bottom: 8px;
+  margin: 16px 0 8px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
 
 :deep(.markdown-body h2) {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
-  margin: 18px 0 10px;
+  margin: 14px 0 8px;
 }
 
 :deep(.markdown-body h3) {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--primary);
-  margin: 16px 0 8px;
+  color: var(--text-primary);
+  margin: 12px 0 6px;
 }
 
 :deep(.markdown-body p) {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 :deep(.markdown-body ul),
 :deep(.markdown-body ol) {
-  padding-left: 24px;
-  margin-bottom: 12px;
+  padding-left: 20px;
+  margin-bottom: 10px;
 }
 
 :deep(.markdown-body li) {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 :deep(.markdown-body ul li) {
@@ -370,26 +371,26 @@ onMounted(() => {
 }
 
 :deep(.markdown-body ul li::marker) {
-  color: var(--primary);
+  color: #94a3b8;
 }
 
 :deep(.markdown-body strong) {
   font-weight: 600;
-  color: var(--primary);
+  color: var(--text-primary);
 }
 
 :deep(.markdown-body pre) {
   background: #f8fafc;
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   overflow-x: auto;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   border: 1px solid var(--border);
   text-align: left !important;
 }
 
 :deep(.markdown-body pre code) {
-  font-size: 13.5px;
+  font-size: 13px;
   font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
   color: #334155;
   background: transparent;
@@ -397,34 +398,34 @@ onMounted(() => {
 }
 
 :deep(.markdown-body code) {
-  background: #eef2ff;
-  padding: 2px 6px;
+  background: #f1f5f9;
+  padding: 2px 5px;
   border-radius: 4px;
-  font-size: 13.5px;
+  font-size: 13px;
   font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-  color: var(--primary);
+  color: #334155;
 }
 
 :deep(.markdown-body blockquote) {
-  margin: 12px 0;
-  padding: 10px 16px;
-  border-left: 4px solid var(--primary);
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid #d1d5db;
   background: #f8fafc;
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 6px 6px 0;
   color: var(--text-secondary);
 }
 
 :deep(.markdown-body table) {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: 12px;
-  font-size: 14px;
+  margin-bottom: 10px;
+  font-size: 13px;
 }
 
 :deep(.markdown-body th),
 :deep(.markdown-body td) {
   border: 1px solid var(--border);
-  padding: 8px 12px;
+  padding: 6px 10px;
   text-align: left !important;
 }
 
@@ -436,11 +437,11 @@ onMounted(() => {
 :deep(.markdown-body hr) {
   border: none;
   border-top: 1px solid var(--border);
-  margin: 18px 0;
+  margin: 14px 0;
 }
 
 :deep(.markdown-body a) {
-  color: var(--primary);
+  color: #4f46e5;
   text-decoration: none;
 }
 
@@ -451,7 +452,7 @@ onMounted(() => {
 :deep(.markdown-body img) {
   max-width: 100%;
   border-radius: 8px;
-  margin: 8px 0;
+  margin: 6px 0;
 }
 
 :deep(.timestamp-badge) {

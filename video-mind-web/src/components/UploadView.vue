@@ -1,204 +1,177 @@
 <template>
-  <div class="upload-view">
-    <div class="upload-card">
-      <div class="upload-title">开始视频学习</div>
-      <div class="upload-subtitle">
-        上传本地视频或粘贴视频链接，AI 将自动生成结构化总结
+  <div class="landing-view">
+    <div class="landing-card">
+      <!-- Brand section -->
+      <div class="brand-section">
+        <h1 class="brand-title">VideoMind</h1>
+        <p class="brand-sub">粘贴视频链接，即刻开始 AI 分析</p>
       </div>
 
-      <div
-          class="upload-zone"
-          @click="triggerFileSelect"
-          @dragover.prevent
-          @drop.prevent="handleDrop"
-      >
-        <div class="upload-zone-icon">📁</div>
-        <div class="upload-zone-text">
-          {{ isDragging ? '松开以上传视频' : '点击上传或拖拽视频到此处' }}
-        </div>
-        <div class="upload-zone-hint">支持 MP4, MKV, AVI, WebM 等格式</div>
-      </div>
-
+      <!-- URL input row -->
       <div class="input-row">
-        <button class="file-btn" @click="triggerFileSelect">📎 选择文件</button>
-        <input
-            ref="fileInput"
-            type="file"
-            accept="video/*"
-            style="display: none"
-            @change="handleFileChange"
-        />
-        <input
-            :value="videoUrl"
-            @input="$emit('update:videoUrl', ($event.target as HTMLInputElement).value)"
-            type="text"
-            class="url-input"
-            placeholder="粘贴视频 URL 链接 (B站/YouTube/...)"
-        />
+        <div class="url-input-wrapper">
+          <span class="input-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+          </span>
+          <input
+              :value="videoUrl"
+              @input="$emit('update:videoUrl', ($event.target as HTMLInputElement).value)"
+              @keyup.enter="$emit('start')"
+              type="text"
+              class="url-input"
+              placeholder="粘贴 B站 / YouTube 视频链接..."
+          />
+        </div>
+        <button
+            class="start-btn"
+            @click="$emit('start')"
+            :disabled="isLoading"
+        >
+          {{ confirmText }}
+        </button>
       </div>
 
-      <button class="confirm-btn" @click="$emit('start')" :disabled="isLoading" :class="{ loading: isLoading }">
-        {{ confirmText }}
-      </button>
-
+      <!-- Feature tags -->
       <div class="feature-tags">
-        <span class="tag">视频内容提取</span>
+        <span class="tag">B站视频</span>
+        <span class="tag">YouTube</span>
+        <span class="tag">Cookie 绑定</span>
         <span class="tag">AI 结构化总结</span>
-        <span class="tag">对话学习助手</span>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-
 defineProps<{
   videoUrl: string
   isLoading: boolean
   confirmText: string
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   'update:videoUrl': [value: string]
   start: []
 }>()
-
-const fileInput = ref<HTMLInputElement | null>(null)
-const isDragging = ref(false)
-
-function triggerFileSelect() {
-  fileInput.value?.click()
-}
-
-function handleFileChange(e: Event) {
-  const target = e.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (file) emit('update:videoUrl', file.name)
-}
-
-function handleDrop(e: DragEvent) {
-  isDragging.value = false
-  const files = e.dataTransfer?.files
-  if (files && files.length > 0) emit('update:videoUrl', files[0].name)
-}
 </script>
 
 <style scoped>
-.upload-view {
+.landing-view {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   height: 100%;
   padding: 40px;
 }
-.upload-card {
-  background: var(--bg-chat);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 48px 40px;
+
+.landing-card {
   width: 100%;
-  max-width: 640px;
-  box-shadow: var(--shadow-lg);
+  max-width: 560px;
   text-align: center;
 }
-.upload-title {
-  font-size: 22px;
+
+/* ── Brand ── */
+.brand-section {
+  margin-bottom: 36px;
+}
+.brand-title {
+  font-size: 44px;
   font-weight: 700;
-  margin-bottom: 8px;
+  letter-spacing: -1px;
+  margin: 0 0 8px;
+  color: #1e293b;
 }
-.upload-subtitle {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin-bottom: 32px;
+.brand-sub {
+  font-size: 16px;
+  color: #94a3b8;
+  margin: 0;
 }
-.upload-zone {
-  border: 2px dashed #cbd5e1;
-  border-radius: var(--radius);
-  padding: 40px 24px;
-  margin-bottom: 24px;
-  transition: all 0.2s;
-  cursor: pointer;
-}
-.upload-zone:hover {
-  border-color: var(--primary);
-  background: #f8fafc;
-}
-.upload-zone-icon {
-  font-size: 40px;
-  margin-bottom: 12px;
-  opacity: 0.6;
-}
-.upload-zone-text {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-}
-.upload-zone-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-}
+
+/* ── Input row ── */
 .input-row {
   display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 6px 6px 6px 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
+.input-row:focus-within {
+  border-color: #94a3b8;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+.url-input-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.input-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  color: #94a3b8;
+}
+.input-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
 .url-input {
   flex: 1;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 14px;
+  border: none;
   outline: none;
-  transition: border-color 0.2s;
+  font-size: 15px;
+  color: #1e293b;
+  background: transparent;
+  padding: 8px 0;
 }
-.url-input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+.url-input::placeholder {
+  color: #c0c8d4;
 }
-.file-btn {
-  padding: 10px 18px;
-  border: 1px solid var(--border);
-  background: white;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-  color: var(--text-primary);
-}
-.file-btn:hover {
-  background: #f8fafc;
-  border-color: #cbd5e1;
-}
-.confirm-btn {
-  width: 100%;
-  padding: 12px 24px;
-  background: var(--primary);
-  color: #575555;
-  border-radius: 8px;
-  border-color: #c8ced9;
+
+.start-btn {
+  padding: 10px 24px;
+  background: #1e293b;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.2s;
+  white-space: nowrap;
+  transition: all 0.2s;
 }
-.confirm-btn:hover {
-  background: var(--primary-hover);
+.start-btn:hover:not(:disabled) {
+  background: #334155;
 }
+.start-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Tags ── */
 .feature-tags {
   display: flex;
   gap: 8px;
   justify-content: center;
-  margin-top: 16px;
+  margin-top: 20px;
+  flex-wrap: wrap;
 }
 .tag {
   font-size: 12px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   background: #f1f5f9;
-  color: var(--text-secondary);
+  color: #64748b;
   border-radius: 20px;
-  border: 1px solid var(--border);
+  border: 1px solid #e2e8f0;
+  font-weight: 500;
 }
 </style>
