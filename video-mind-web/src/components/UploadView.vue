@@ -22,7 +22,7 @@
               @keyup.enter="$emit('start')"
               type="text"
               class="url-input"
-              placeholder="粘贴 B站 / YouTube 视频链接..."
+              placeholder="粘贴 B站 视频链接..."
           />
         </div>
         <button
@@ -37,9 +37,9 @@
       <!-- Feature tags -->
       <div class="feature-tags">
         <span class="tag">B站视频</span>
-        <span class="tag">YouTube</span>
         <span class="tag">Cookie 绑定</span>
         <span class="tag">AI 结构化总结</span>
+        <span class="tag">持久化对话</span>
       </div>
     </div>
   </div>
@@ -64,21 +64,21 @@ defineEmits<{
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: 40px;
+  padding: 10px 40px 15%;
 }
 
 .landing-card {
   width: 100%;
-  max-width: 560px;
+  max-width: 80%;
   text-align: center;
 }
 
 /* ── Brand ── */
 .brand-section {
-  margin-bottom: 36px;
+  margin-bottom: 1%;
 }
 .brand-title {
-  font-size: 44px;
+  font-size: 56px;
   font-weight: 700;
   letter-spacing: -1px;
   margin: 0 0 8px;

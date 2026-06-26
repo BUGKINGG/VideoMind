@@ -106,6 +106,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
+    public void updateUsername(String username){
+        Long userId = BaseContext.getCurrentId();
+
+        LambdaUpdateWrapper<User> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(User::getId, userId)
+            .set(User::getUsername, username);
+
+        userMapper.update(null, wrapper);
+    }
+
+    @Override
     public List<MessageVO> getList(){
         Long userId = BaseContext.getCurrentId();
         // 包含处理中(status=0)和已完成(status=1)，排除失败(status=2)

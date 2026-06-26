@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 
 @RestController
@@ -85,6 +86,18 @@ public class UserController {
         String cookie = cookieDTO.getCookie();
         log.info("更新cookie：{}", cookie);
         userService.updateCookie(cookie);
+        return Result.success();
+    }
+
+    /**
+     * 更新用户昵称
+     */
+    @PostMapping("/username")
+    @Operation(summary = "更新用户昵称")
+    public Result updateUsername(@RequestBody Map<String, String> body){
+        String username = body.get("username");
+        log.info("更新昵称：{}", username);
+        userService.updateUsername(username);
         return Result.success();
     }
 

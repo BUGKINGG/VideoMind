@@ -33,6 +33,12 @@ public interface UserService extends IService<User> {
     void updateCookie(String cookie);
 
     /**
+     * 更新用户昵称
+     * @param username
+     */
+    void updateUsername(String username);
+
+    /**
      * 获得用户的历史记录列表
      * @return
      */

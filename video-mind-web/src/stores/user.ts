@@ -29,6 +29,10 @@ export const useUserStore = defineStore('user', () => {
         cookie.value = newCookie
     }
 
+    function updateUsername(newUsername: string) {
+        username.value = newUsername
+    }
+
     function logout() {
         token.value = ''
         username.value = ''
@@ -44,6 +48,7 @@ export const useUserStore = defineStore('user', () => {
         hasCookie,
         setUserInfo,
         updateCookie,
+        updateUsername,
         logout
     }
 }, {
