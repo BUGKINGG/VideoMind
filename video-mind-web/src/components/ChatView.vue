@@ -5,6 +5,7 @@
       :status-text="headerStatusText"
       :bvid="bvid"
       :part="part"
+      :url="url"
       @back="$emit('back')"
     />
     <MessageList :messages="messages" ref="messageListRef" />
@@ -27,6 +28,7 @@ const props = defineProps<{
   isProcess: boolean
   bvid?: string
   part?: number
+  url?: string
 }>()
 
 const emit = defineEmits<{

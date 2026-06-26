@@ -21,6 +21,7 @@ export function useSummary(messages: Ref<Message[]>) {
         currentVideoTitle: '',
         bvid: '' as string,
         part: 1 as number,
+        url: '' as string,
         subtitleCount: 0,
         currentConversationId: null as number | null,
         currentVideoId: null as number | null,
@@ -60,6 +61,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 }
                 if (data.bvid !== undefined) summary.bvid = data.bvid
                 if (data.part !== undefined) summary.part = data.part
+                if (data.url !== undefined) summary.url = data.url
                 return
             }
 
@@ -72,6 +74,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 if (data.conversationId) summary.currentConversationId = data.conversationId
                 if (data.bvid !== undefined) summary.bvid = data.bvid
                 if (data.part !== undefined) summary.part = data.part
+                if (data.url !== undefined) summary.url = data.url
                 summary.stage = 'summarizing'
                 stopAnim()
                 // 替换占位符为累积内容
@@ -154,6 +157,7 @@ export function useSummary(messages: Ref<Message[]>) {
                 summary.stage = 'done'
                 if (data.bvid !== undefined) summary.bvid = data.bvid
                 if (data.part !== undefined) summary.part = data.part
+                if (data.url !== undefined) summary.url = data.url
                 // 匹配流式消息或占位符（重连场景下可能是纯 placeholder）
                 const idx = messages.value.findIndex(m => m.isStreaming || m.isPlaceholder)
                 if (idx !== -1) {
@@ -218,6 +222,7 @@ export function useSummary(messages: Ref<Message[]>) {
                     summary.currentVideoId = res.data.videoId || null
                     summary.bvid = res.data.bvid || ''
                     summary.part = res.data.part || 1
+                    summary.url = res.data.url || videoUrl
                     summary.stage = 'done'
                     messages.value = [{
                         id: Date.now() + '_summary',
@@ -231,6 +236,7 @@ export function useSummary(messages: Ref<Message[]>) {
 
                 // 没击中缓存，则先使用默认数据占位
                 summary.currentVideoTitle = videoUrl
+                summary.url = videoUrl
                 summary.subtitleCount = 0
                 summary.stage = 'parsing'
                 startAnim()

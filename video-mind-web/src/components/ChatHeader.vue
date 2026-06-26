@@ -1,7 +1,7 @@
 <template>
   <div class="chat-header">
     <button class="back-btn" @click="$emit('back')">← 返回</button>
-    <div class="chat-header-center">
+    <div class="chat-header-center" :class="{ clickable: !!url }" @click="openUrl">
       <span v-if="bvid" class="meta-bvid">{{ bvid }}</span>
       <span v-if="part" class="meta-part">p{{ part }}</span>
       <h3 class="header-title">{{ title }}</h3>
@@ -11,14 +11,21 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+const props = defineProps<{
   title: string
   statusText: string
   bvid?: string
   part?: number
+  url?: string
 }>()
 
 defineEmits(['back'])
+
+function openUrl() {
+  if (props.url) {
+    window.open(props.url, '_blank')
+  }
+}
 </script>
 
 <style scoped>
@@ -41,6 +48,15 @@ defineEmits(['back'])
   gap: 6px;
   min-width: 0;
   max-width: 75%;
+}
+.chat-header-center.clickable {
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+.chat-header-center.clickable:hover {
+  background: #f8fafc;
 }
 .meta-bvid {
   font-size: 11px;
