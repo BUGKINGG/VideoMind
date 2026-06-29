@@ -1,15 +1,81 @@
-.codex_inspect_videomind/
+# ========== Claude ==========
+.claude/
 
+# ========== Python ==========
 __pycache__/
 *.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
 
-agent-service/.venv/
-agent-service/.env
-agent-service/data/
-
-video-mind-agent/.env
+# ========== Virtual Environment ==========
+.venv/
+venv/
+env/
 video-mind-agent/.venv/
-video-mind-agent/__pycache__/
+video-mind-agent/.env
+
+# ========== Python Agent Data ==========
 video-mind-agent/data/
 video-mind-agent/app/repositories/data/
 new-agent-service/*.log
+
+# ========== Node.js / Frontend ==========
+node_modules/
+video-mind-web/node_modules/
+video-mind-web/dist/
+*.log
+npm-debug.log*
+
+# ========== Java / Maven ==========
+target/
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+video-mind-java/target/
+
+# ========== IDE ==========
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ========== OS ==========
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ========== Environment & Config ==========
+.env
+.env.local
+.env.*.local
+*.env
+
+# ========== Docker ==========
+vm-all.tar
+
+# ========== Logs ==========
+logs/
+*.log
+
+# ========== Test / Temp ==========
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# ========== Code Inspection (legacy) ==========
+.codex_inspect_videomind/

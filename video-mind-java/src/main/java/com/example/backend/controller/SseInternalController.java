@@ -65,6 +65,12 @@ public class SseInternalController {
                         ? Integer.valueOf(payload.get("part").toString()) : 1;
                     agentService.pushDoneInternal(sid, videoId, conversationId, title, summary, count, bvid, part);
                 }
+                case "chat_done" -> {
+                    Long conversationId = payload.get("conversationId") != null
+                        ? Long.valueOf(payload.get("conversationId").toString()) : null;
+                    String answer = (String) payload.get("answer");
+                    agentService.pushChatDoneInternal(sid, conversationId, answer);
+                }
                 case "error" -> {
                     String msg = (String) payload.get("message");
                     agentService.pushErrorInternal(sid, msg);

@@ -25,7 +25,7 @@ services:
     image: redis:7-alpine
     container_name: vm-redis
     ports:
-      - "6379:6379"
+      - "16379:6379"
     networks:
       - vm-net
     deploy:
@@ -53,7 +53,7 @@ services:
     image: qdrant/qdrant:v1.9.0
     container_name: vm-qdrant
     ports:
-      - "6333:6333"
+      - "16333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     networks:
@@ -69,7 +69,7 @@ services:
     container_name: vm-parser
     command: python fetch_video.py
     ports:
-      - "18001:8001"
+      - "8001:8001"
     networks:
       - vm-net
     deploy:

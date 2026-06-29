@@ -29,4 +29,6 @@ public interface AgentService extends IService<Video> {
                           int count, String bvid, Integer part);
 
     void pushErrorInternal(String sid, String message);
+
+    void pushChatDoneInternal(String sid, Long conversationId, String answer);
 }

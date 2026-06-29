@@ -18,13 +18,19 @@ mybatis-plus:
   type-aliases-package: com.example.backend.entity      # 实体类包路径，XML 里可以简写
   configuration:
     map-underscore-to-camel-case: true             # 自动驼峰转换（create_time -> createTime）
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl  # 打印 SQL 到控制台
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
   global-config:
     db-config:
       id-type: auto
 #      logic-delete-field: deleted  # 逻辑删除字段（软删除）
 #      logic-delete-value: 1
 #      logic-not-delete-value: 0
+
+logging:
+  level:
+    com.example.backend.mapper: warn
+    com.zaxxer.hikari: warn
+    com.zaxxer.hikari.pool: warn
 
 spring:
   application:
@@ -37,7 +43,7 @@ spring:
   data:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}
-      port: 6379
+      port: 16379
       database: 0
       timeout: 5000ms
   threads:
