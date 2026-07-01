@@ -3,8 +3,10 @@ from pathlib import Path
 import os
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# DATA_DIR: 优先使用环境变量（Docker 中设为 /app/data 配合 volume 挂载），
+# 否则 fallback 到项目根目录下的 data/
+DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "data")))
 
 
 def load_local_env(env_path: str = ".env") -> None:
@@ -20,7 +22,9 @@ def load_local_env(env_path: str = ".env") -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        os.environ[key] = value
+        # Only set if not already present — env vars (e.g. from Docker) take priority
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 @dataclass(frozen=True)

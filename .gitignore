@@ -19,6 +19,7 @@ video-mind-agent/.venv/
 video-mind-agent/.env
 
 # ========== Python Agent Data ==========
+data/
 video-mind-agent/data/
 video-mind-agent/app/repositories/data/
 new-agent-service/*.log

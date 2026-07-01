@@ -43,7 +43,7 @@ spring:
   data:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:localhost}
-      port: 16379
+      port: ${SPRING_DATA_REDIS_PORT:6379}
       database: 0
       timeout: 5000ms
   threads:
